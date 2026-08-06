@@ -1,17 +1,18 @@
 # Langbai H3 Studio
 
-## v0.9.0?AutoDL ???????????
+## v0.10.0：可爱二次元界面与可恢复 AutoDL 部署
 
-- Windows ???? Studio?AutoDL/Linux ?????? ComfyUI ? MiniMax-H3 ?????
-- ??? AutoDL SSH ?????????????known_hosts ???????????????? 8188?
-- ????????? GPU??????????Python?ComfyUI?H3 ????????? KJ H3 SageAttention?
-- ??????????????????Ref2VA ???????????? API Graph?
+- 银紫赛博与可爱二次元结合的简体中文界面，加入狼尊主题同人吉祥物和应用图标
+- AutoDL 独立部署目录、空间预检、后台模型下载、速度／进度／ETA、断点续传、取消与精确回滚
+- Windows 本地 Studio 通过严格 `known_hosts` 校验的 OpenSSH 隧道连接远端 ComfyUI，不公开 8188 端口
+- 默认把视频保存到安装程序同级 `output`，也可固定自定义目录或每次生成前询问
+- KJNodes H3 SageAttention 可安装并真实插入 H3 API Graph；未经 H3 验证的插件不会标记为兼容
 
-????????? AutoDL ????????????????????????? `253/678` ??????????????????????
+Windows x64 Preview 安装包：[`Langbai-H3-Studio_0.10.0_x64-setup.exe`](release/v0.10.0/Langbai-H3-Studio_0.10.0_x64-setup.exe)
 
-Windows x64 Preview ????[`release/v0.9.0/Langbai-H3-Studio_0.9.0_x64-setup.exe`](release/v0.9.0/Langbai-H3-Studio_0.9.0_x64-setup.exe)
+SHA-256：`B9E6BBAB672D8253539BEAC2FED7E868FAFE355A98DB1910DD2891713703453D`
 
-SHA-256?`31C4FE6C0C8EEAF9EEB6DDFF230168E4D589F047B99577B70DBA1134686E06D4`
+> 当前限制：8–10GB 显存档仍是实验目标；真实 AutoDL/RTX 5090 与 8GB 生成基准尚待对应硬件验证。市场模板 `253/678` 的内部内容不是本项目控制范围，Studio 使用隔离目录避免覆盖它。
 
 ## v0.8.0：8GB 实验档与远程 RTX 5090
 
@@ -68,15 +69,9 @@ Windows 桌面开发：`cd app; npm run desktop:dev`
 
 Windows Setup 构建需从 Visual Studio x64 Developer Command Prompt 执行：`cd app; npm run desktop:build`
 
-当前预览安装包位于 `release/v0.6.0/Langbai-H3-Studio_0.6.0_x64-setup.exe`。SHA-256：`1DA5FDBFC8B8777E0EA6FF271AB313819AE4197F98C59E2081D8E27661C4646A`。
+发布步骤：将 NSIS 产物重命名为仓库约定的连字符文件名，生成同名 `.sha256`，提交到 `release/v<版本>/`，再把这两个文件上传到同名 GitHub Preview Release。应用内更新器读取 GitHub Release JSON，并在启动安装包前强制校验对应 SHA-256。
 
-`v0.6.0` 首次接通官方 H3 API Graph、素材上传、任务提交、状态轮询和结果保存；真实 H3 GPU 生成仍需按兼容性文档完成固定上游预览补丁与硬件实测，因此该版本以 GitHub Pre-release 发布。
-
-最新预览版为 `v0.6.1`：`release/v0.6.1/Langbai-H3-Studio_0.6.1_x64-setup.exe`。SHA-256：`F34FFA8A4E6F8171E9F8A2FAA9669B118F30C737C64C769AB12651E974AFA0AD`。该版本新增声明式加速插件管理、应用内更新和新手参数说明。
-
-兼容性记录版 `v0.6.2`：`release/v0.6.2/Langbai-H3-Studio_0.6.2_x64-setup.exe`。SHA-256：`4FA3CB2CE2E0A02076D985A2978FF3EAFDAF84F3A57F146687100B3C23529D65`。每次真实生成会在本机保存硬件、峰值资源、耗时、模型和插件组合报告，不会自动上传。
-
-最新新手体验版 `v0.6.3`：`release/v0.6.3/Langbai-H3-Studio_0.6.3_x64-setup.exe`。SHA-256：`F9B93D9803BF1F731FB69948BBFC604BE4C1B1E954B3DEFF6EB95E6159189603`。新增本地模型真实关联、三档显存策略、语义工作流预设、可用采样控件与乱码修复。
+当前 Preview 尚未进行商业代码签名，Windows 可能显示“未知发布者”；文件完整性以仓库和 GitHub Release 同时公布的 SHA-256 为准。
 
 ## 文档
 
@@ -89,4 +84,4 @@ Windows Setup 构建需从 Visual Studio x64 Developer Command Prompt 执行：`
 
 MiniMax-H3 当前公开的 H3-Base 可进行本地 768p 音视频生成；官方 H3-Context-IR 与 H3-Regenerate-2K 未随初始开源版本发布，因此完整官方 2K 流程需要用户配置 MiniMax API。16–24GB 单卡方案依赖量化、卸载、分块和社区优化，具体组合必须通过真实硬件测试后再标记“已验证”。
 
-- [AutoDL ??????](docs/AUTODL_DEPLOYMENT.md)
+- [AutoDL 隔离部署](docs/AUTODL_DEPLOYMENT.md)
