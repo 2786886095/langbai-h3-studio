@@ -1,63 +1,94 @@
 # Langbai H3 Studio
 
-## v0.10.0：可爱二次元界面与可恢复 AutoDL 部署
+面向 Windows NVIDIA 用户的 MiniMax-H3 视频生成桌面软件。它用简洁的中文创作表单代替 ComfyUI 节点画布，同时保留本地模型、外接 ComfyUI、远程 GPU、AutoDL、社区加速插件和 MiniMax 云端 API。
 
-- 银紫赛博与可爱二次元结合的简体中文界面，加入狼尊主题同人吉祥物和应用图标
-- AutoDL 独立部署目录、空间预检、后台模型下载、速度／进度／ETA、断点续传、取消与精确回滚
-- Windows 本地 Studio 通过严格 `known_hosts` 校验的 OpenSSH 隧道连接远端 ComfyUI，不公开 8188 端口
-- 默认把视频保存到安装程序同级 `output`，也可固定自定义目录或每次生成前询问
-- KJNodes H3 SageAttention 可安装并真实插入 H3 API Graph；未经 H3 验证的插件不会标记为兼容
+> 当前为 Preview。项目代码使用 Apache-2.0；银狼·狼尊主题图像属于非官方同人二次创作资产，许可边界见 [`app/src/assets/README.md`](app/src/assets/README.md)。
 
-Windows x64 Preview 安装包：[`Langbai-H3-Studio_0.10.2_x64-setup.exe`](release/v0.10.2/Langbai-H3-Studio_0.10.2_x64-setup.exe)
+## v0.11.0：全运行日志与中文品牌安装器
 
-SHA-256：`B9E6BBAB672D8253539BEAC2FED7E868FAFE355A98DB1910DD2891713703453D`
+- 参考 ComfyUI 的诊断布局，新增软件内置黑色日志终端
+- 汇总运行环境、下载、模型、插件、生成、AutoDL、远程 GPU、更新和路径状态
+- 实时捕获托管 ComfyUI 的 stdout/stderr，不弹出外部 CMD 窗口
+- 本次会话完整日志写入本地 JSONL，界面显示最近 2000 条
+- 可由用户选择位置保存全部日志或仅错误记录
+- 自动隐藏 Windows 用户目录以及常见 API Key、Token、Bearer 凭据
+- Windows Setup 强制简体中文，并使用原版银狼头像图标、狼尊主题侧栏和页眉
+- 新安装时可以选择软件安装目录；默认按当前 Windows 用户安装，不要求管理员权限
 
-> 当前限制：8–10GB 显存档仍是实验目标；真实 AutoDL/RTX 5090 与 8GB 生成基准尚待对应硬件验证。市场模板 `253/678` 的内部内容不是本项目控制范围，Studio 使用隔离目录避免覆盖它。
+![Langbai H3 Studio 运行日志终端](docs/screenshots/runtime-log-console.png)
 
-![Langbai H3 Studio v0.10.1 创作首页](docs/screenshots/v0.10.1-home.png)
+![简体中文安装欢迎页](docs/screenshots/installer-v0.11.0-welcome.png)
 
-## v0.8.0：8GB 实验档与远程 RTX 5090
+## 下载
 
-- 8–10GB NVIDIA 显卡提供未验证的极低显存档：CPU VAE、608×352 起步和极限卸载诊断
-- 通过 Windows OpenSSH 隧道安全连接租用 RTX 5090 或其他远程 GPU 工作站
-- 首批真实托管社区节点目录：KJNodes H3 SageAttention 与 FunPack H3 兼容扩展
-- KJNodes H3 SageAttention 可真实插入生成 API Graph，并单独记录兼容性结果
+Windows x64 Preview：[`Langbai-H3-Studio_0.11.0_x64-setup.exe`](release/v0.11.0/Langbai-H3-Studio_0.11.0_x64-setup.exe)
 
-8GB 目前是实验目标，不是稳定兼容保证。远端方案要求 ComfyUI 只监听远端
-`127.0.0.1`，不应开放公网 8188。参见 [8GB 实验档](docs/H3_8GB_EXPERIMENT.md)
-和 [远程 GPU 连接](docs/REMOTE_GPU.md)。
+SHA-256：`2BFFB13696ECDBE4BA097CC275848AC9D037C6FAECFA61CF41D30FB7CB2280FD`
 
-## v0.7.0 云端 Hailuo API
+安装包目前没有商业代码签名，Windows 可能显示“未知发布者”。请核对 GitHub Release 与仓库公布的 SHA-256。
 
-除本地 MiniMax-H3 / ComfyUI 外，Studio 现已提供独立的 **MiniMax 云端 Hailuo API** 模式：
+## 核心能力
 
-- Hailuo-2.3：文字或首帧生成视频
-- Hailuo-02：首尾帧生成视频
-- API Key 保存到 Windows Credential Manager，应用界面不回显
-- 云端任务自动轮询并将结果保存到用户选择的本地目录
+### 新手创作
 
-云端 Hailuo API 与开源 MiniMax-H3 是两套不同的执行引擎。云端服务按 MiniMax
-账户实际用量计费，本地 H3 仍由用户显卡和 ComfyUI 执行。详见
-[云端 API 接入规范](docs/MINIMAX_CLOUD_API.md)。
+- 文字生成视频
+- 首帧／尾帧生成视频
+- 图片、视频、音频和文字的全模态参考生成
+- 简体中文参数说明、提示词示例和推荐预设
+- 生成历史、设置复用和错误记录
 
-面向 Windows NVIDIA 单卡用户的 MiniMax-H3 视频生成桌面软件，以清晰的创作表单和智能预设替代 ComfyUI 节点画布，并保留本地模型、外接 ComfyUI、MiniMax API 与社区加速插件扩展能力。
+### 本地运行
 
-> 当前阶段：Windows MVP 开发版。已提供 Tauri 桌面壳、硬件检测、托管 ComfyUI 安装与进程管理、H3 优化模型真实断点下载、Windows 原生素材选择与流式上传、输出目录验证、本机 ComfyUI 能力探测和 SQLite 任务记录；官方 UI Graph 到可提交 API Graph 的可靠转换及完整生成执行继续开发中。
+- 软件内置并管理独立 ComfyUI Runtime
+- 也可连接用户已有的本地 ComfyUI
+- 自动检测 MiniMax-H3 必需节点、模型和运行状态
+- 托管 ComfyUI 只监听 `127.0.0.1`
+- 支持实验性的 8–10GB 极低显存档
 
-## 已确认范围
+### 模型管理
 
-- Windows 首发，简体中文，默认浅色并支持深色
-- 重点适配 NVIDIA 16–24GB 单卡，能力以实测兼容矩阵为准
-- 内置并管理独立 ComfyUI，同时可连接已有 ComfyUI
-- 纯本地 H3-Base 与用户主动启用的 MiniMax API 双模式
-- 文字、图片、视频、音频输入及输出路径选择
-- 模型断点下载、实时速度、ETA、校验与本地模型复用
-- Schema 驱动的参数解释、预设与渐进披露
-- 社区加速节点通过公开 `.h3plugin` 适配协议接入
-- Setup、GitHub Releases、应用内签名更新与回滚
-- Studio 自有代码 Apache-2.0；捆绑依赖、模型和插件各自遵循其许可证
+- 软件内下载官方固定版本模型
+- 显示文件名、进度、速度和预计剩余时间
+- Range 断点续传、SHA-256 校验和原子替换
+- 扫描并关联用户已经下载的本地模型
+- FL2VA 与 Ref2VA 共享编码器和 VAE 文件
 
-## 运行与构建
+### 保存位置
+
+- 默认保存到软件可执行文件同级的 `output` 目录
+- 可以设置固定的自定义默认目录
+- 可以选择每次生成前询问保存位置
+
+### 加速插件
+
+- KJNodes `MiniMaxH3MemoryEfficientSageAttentionPatch` 可真实插入 H3 API Graph
+- FunPack 作为社区兼容扩展托管，不宣称具有加速效果
+- 支持声明式 `.h3plugin` 适配包的检查、安装、启停和卸载
+- 未经 MiniMax-H3 兼容验证的 GGUF、TeaCache、通用 FlashAttention 不会标记为可用
+
+### AutoDL 与远程 GPU
+
+- 粘贴 AutoDL SSH 命令并解析主机、用户和端口
+- 严格校验 `known_hosts`，使用 Windows OpenSSH 隧道连接远端 ComfyUI
+- 检测远端 GPU、显存、内存、磁盘、Python、ComfyUI、H3 模型和 KJNodes
+- 使用 `/workspace/LangbaiH3Studio` 隔离目录，不覆盖市场镜像内容
+- 后台下载模型，支持进度恢复、取消、断点续传和精确回滚
+
+### 更新与诊断
+
+- 从本项目 GitHub Releases 检查 Preview 更新
+- 软件内下载 Setup，完成 SHA-256 验证后启动更新
+- 本机兼容性记录包含硬件、采样观察资源、生成耗时和插件组合
+- 可导出匿名基准 JSON，不包含提示词、素材、路径、ComfyUI 地址、任务 ID 或错误详情
+
+## 硬件边界
+
+- 16–24GB NVIDIA 单卡是当前主要设计基准
+- 8–10GB 档依赖 CPU 卸载、较低分辨率和社区优化，目前仍是实验目标
+- RTX 5090 和 AutoDL 方案已具备连接、部署和记录链路，但真实 MiniMax-H3 性能矩阵仍需对应硬件
+- 模型体积、内存消耗和插件收益必须以真实生成报告为准
+
+## 本地开发
 
 ```powershell
 cd app
@@ -65,25 +96,33 @@ npm install
 npm run dev
 ```
 
-构建验证：`cd app; npm run build`
+前端构建：
 
-Windows 桌面开发：`cd app; npm run desktop:dev`
+```powershell
+cd app
+npm run build
+```
 
-Windows Setup 构建需从 Visual Studio x64 Developer Command Prompt 执行：`cd app; npm run desktop:build`
+Windows Setup 需要在 Visual Studio x64 Developer Command Prompt 中构建：
 
-发布步骤：将 NSIS 产物重命名为仓库约定的连字符文件名，生成同名 `.sha256`，提交到 `release/v<版本>/`，再把这两个文件上传到同名 GitHub Preview Release。应用内更新器读取 GitHub Release JSON，并在启动安装包前强制校验对应 SHA-256。
-
-当前 Preview 尚未进行商业代码签名，Windows 可能显示“未知发布者”；文件完整性以仓库和 GitHub Release 同时公布的 SHA-256 为准。
+```powershell
+cd app
+npm run desktop:build
+```
 
 ## 文档
 
-- [产品需求文档](docs/PRD.md)
+- [产品需求](docs/PRD.md)
 - [技术架构](docs/ARCHITECTURE.md)
+- [H3 API Graph](docs/H3_API_GRAPH_SPEC.md)
+- [H3 Runtime 兼容性](docs/H3_RUNTIME_COMPATIBILITY.md)
+- [8GB 实验档](docs/H3_8GB_EXPERIMENT.md)
+- [远程 GPU](docs/REMOTE_GPU.md)
+- [AutoDL 隔离部署](docs/AUTODL_DEPLOYMENT.md)
+- [加速兼容性](docs/ACCELERATION_COMPATIBILITY.md)
 - [社区插件规范](docs/PLUGIN_SPEC.md)
 - [设计系统](design-system/langbai-h3-studio/MASTER.md)
 
-## 事实边界
+## 许可证
 
-MiniMax-H3 当前公开的 H3-Base 可进行本地 768p 音视频生成；官方 H3-Context-IR 与 H3-Regenerate-2K 未随初始开源版本发布，因此完整官方 2K 流程需要用户配置 MiniMax API。16–24GB 单卡方案依赖量化、卸载、分块和社区优化，具体组合必须通过真实硬件测试后再标记“已验证”。
-
-- [AutoDL 隔离部署](docs/AUTODL_DEPLOYMENT.md)
+代码许可证：[Apache-2.0](LICENSE)。第三方模型、节点、角色形象和其他资产继续遵循各自许可证与权利人的规则。

@@ -1,7 +1,8 @@
 use serde::Serialize;
 use std::{
+    io::{BufRead, BufReader, Read},
     path::PathBuf,
-    process::{Child, Command},
+    process::{Child, Command, Stdio},
     sync::Mutex,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -11,6 +12,7 @@ use url::Url;
 
 mod autodl_deploy;
 mod autodl_remote;
+mod app_log;
 mod benchmark;
 mod comfy;
 mod comfy_transport;
@@ -52,6 +54,39 @@ fn benchmark_save(report: benchmark::CompatibilityReport) -> Result<String, Stri
 #[tauri::command]
 fn benchmark_list() -> Result<Vec<benchmark::CompatibilityReport>, String> {
     benchmark::list_reports(&benchmark_root())
+}
+
+#[tauri::command]
+fn app_log_list(state: tauri::State<'_, app_log::AppLogState>) -> Vec<app_log::LogEntry> {
+    state.list()
+}
+
+#[tauri::command]
+fn app_log_append(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, app_log::AppLogState>,
+    level: String,
+    source: String,
+    message: String,
+) -> Result<app_log::LogEntry, String> {
+    let entry = state.append(app_log::LogLevel::parse(&level)?, &source, &message);
+    let _ = app.emit("app-log-entry", &entry);
+    Ok(entry)
+}
+
+#[tauri::command]
+fn app_log_clear(state: tauri::State<'_, app_log::AppLogState>) {
+    state.clear();
+}
+
+#[tauri::command]
+fn app_log_save(
+    state: tauri::State<'_, app_log::AppLogState>,
+    destination: String,
+    errors_only: bool,
+) -> Result<String, String> {
+    app_log::save(&state, &PathBuf::from(destination), errors_only)
+        .map(|path| path.to_string_lossy().into_owned())
 }
 
 #[tauri::command]
@@ -580,6 +615,44 @@ struct ManagedRuntimeProcess {
 #[derive(Default)]
 struct ManagedRuntimeState(Mutex<Option<ManagedRuntimeProcess>>);
 
+fn spawn_runtime_log_reader<R: Read + Send + 'static>(
+    reader: R,
+    source: &'static str,
+    level: app_log::LogLevel,
+    app: tauri::AppHandle,
+    logs: app_log::AppLogState,
+) {
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(reader);
+        let mut bytes = Vec::new();
+        loop {
+            bytes.clear();
+            match reader.read_until(b'\n', &mut bytes) {
+                Ok(0) => break,
+                Ok(_) => {
+                    if bytes.len() > 16 * 1024 {
+                        bytes.truncate(16 * 1024);
+                        bytes.extend_from_slice("…（单行日志已截断）".as_bytes());
+                    }
+                    let message = String::from_utf8_lossy(&bytes).trim().to_string();
+                    if message.is_empty() { continue; }
+                    let entry = logs.append(level.clone(), source, &message);
+                    let _ = app.emit("app-log-entry", entry);
+                }
+                Err(error) => {
+                    let entry = logs.append(
+                        app_log::LogLevel::Error,
+                        source,
+                        &format!("读取进程日志失败：{error}"),
+                    );
+                    let _ = app.emit("app-log-entry", entry);
+                    break;
+                }
+            }
+        }
+    });
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ManagedRuntimeStatus {
@@ -592,7 +665,9 @@ struct ManagedRuntimeStatus {
 
 #[tauri::command]
 fn runtime_start(
-    state: tauri::State<'_, ManagedRuntimeState>,
+    app: tauri::AppHandle,
+    runtime_state: tauri::State<'_, ManagedRuntimeState>,
+    log_state: tauri::State<'_, app_log::AppLogState>,
     memory_profile: Option<runtime_manager::MemoryProfile>,
 ) -> Result<ManagedRuntimeStatus, String> {
     let manager = runtime_manager::RuntimeManager::new(runtime_root());
@@ -614,7 +689,7 @@ fn runtime_start(
     if !plan.program.is_file() {
         return Err("托管 Runtime 缺少 Python，可在运行环境页面执行修复".into());
     }
-    let mut slot = state
+    let mut slot = runtime_state
         .0
         .lock()
         .map_err(|_| "Runtime 状态锁异常".to_string())?;
@@ -638,16 +713,26 @@ fn runtime_start(
     command
         .args(&plan.args)
         .current_dir(&plan.working_dir)
-        .envs(&plan.environment);
+        .envs(&plan.environment)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000000);
     }
-    let child = command
+    let mut child = command
         .spawn()
         .map_err(|e| format!("启动托管 ComfyUI 失败：{e}"))?;
     let pid = child.id();
+    if let Some(stdout) = child.stdout.take() {
+        spawn_runtime_log_reader(stdout, "ComfyUI.stdout", app_log::LogLevel::Info, app.clone(), log_state.inner().clone());
+    }
+    if let Some(stderr) = child.stderr.take() {
+        spawn_runtime_log_reader(stderr, "ComfyUI.stderr", app_log::LogLevel::Warn, app.clone(), log_state.inner().clone());
+    }
+    let started_entry = log_state.append(app_log::LogLevel::Info, "运行环境", &format!("托管 ComfyUI 已启动，PID {pid}"));
+    let _ = app.emit("app-log-entry", started_entry);
     let started_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -668,7 +753,9 @@ fn runtime_start(
 
 #[tauri::command]
 fn runtime_status(
+    app: tauri::AppHandle,
     state: tauri::State<'_, ManagedRuntimeState>,
+    log_state: tauri::State<'_, app_log::AppLogState>,
 ) -> Result<ManagedRuntimeStatus, String> {
     let mut slot = state
         .0
@@ -696,6 +783,9 @@ fn runtime_status(
             exit_code: None,
         }),
         Some(status) => {
+            let level = if status.success() { app_log::LogLevel::Info } else { app_log::LogLevel::Error };
+            let entry = log_state.append(level, "运行环境", &format!("托管 ComfyUI 已退出，退出码 {:?}", status.code()));
+            let _ = app.emit("app-log-entry", entry);
             let result = ManagedRuntimeStatus {
                 running: false,
                 pid: Some(process.child.id()),
@@ -711,7 +801,9 @@ fn runtime_status(
 
 #[tauri::command]
 fn runtime_stop(
+    app: tauri::AppHandle,
     state: tauri::State<'_, ManagedRuntimeState>,
+    log_state: tauri::State<'_, app_log::AppLogState>,
 ) -> Result<ManagedRuntimeStatus, String> {
     let mut slot = state
         .0
@@ -735,6 +827,8 @@ fn runtime_stop(
         .child
         .wait()
         .map_err(|e| format!("等待 Runtime 退出失败：{e}"))?;
+    let entry = log_state.append(app_log::LogLevel::Info, "运行环境", &format!("用户已停止托管 ComfyUI，PID {pid}"));
+    let _ = app.emit("app-log-entry", entry);
     Ok(ManagedRuntimeStatus {
         running: false,
         pid: Some(pid),
@@ -1417,13 +1511,22 @@ fn output_path_for_executable(executable: &std::path::Path) -> Result<PathBuf, S
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let log_root = runtime_root()
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("logs");
     tauri::Builder::default()
+        .manage(app_log::AppLogState::new(log_root))
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             probe_system,
             benchmark_save,
             benchmark_list,
             benchmark_export_anonymous,
+            app_log_list,
+            app_log_append,
+            app_log_clear,
+            app_log_save,
             probe_comfyui,
             validate_output_path,
             default_output_path,

@@ -6,7 +6,7 @@ import {
   Aperture, Boxes, ChevronDown, ChevronRight, CircleHelp, Clock3, Cpu,
   Download, FolderOpen, HardDrive, Image, Info, LayoutGrid, Menu,
   Moon, Play, RotateCcw, Settings, ShieldCheck,
-  Sparkles, Sun, Upload, Video, WandSparkles, X, Zap
+  Sparkles, Sun, Terminal, Trash2, Upload, Video, WandSparkles, X, Zap
 } from 'lucide-react'
 import './App.css'
 import silverWolfMascot from './assets/silver-wolf-lv999-mascot.png'
@@ -45,6 +45,7 @@ type AutoDlDeployPlan = {deploymentId:string;targetPath:string;remoteComfyPort:n
 type AutoDlDeployProgress = {sequence:number;stage:string;message:string}
 type AutoDlDeployPrepareResult = {plan:AutoDlDeployPlan;progress:AutoDlDeployProgress[];scriptSha256:string}
 type AutoDlDownloadMessage = {state?:string;file?:string;relativePath?:string;downloadedBytes?:number;size?:number;speedBps?:number;etaSeconds?:number;pid?:number;error?:string}
+type AppLogEntry = {id:number;timestampMs:number;level:'debug'|'info'|'warn'|'error';source:string;message:string}
 
 const parseAutoDlDownloadMessage = (value?:string):AutoDlDownloadMessage => {try{return value?JSON.parse(value):{}}catch{return {}}}
 
@@ -122,6 +123,12 @@ function App() {
   const benchmarkRef = useRef<BenchmarkState | null>(null)
   const [benchmarkReports, setBenchmarkReports] = useState<BenchmarkReport[]>([])
   const [benchmarkExportMessage, setBenchmarkExportMessage] = useState('')
+  const [logConsoleOpen, setLogConsoleOpen] = useState(()=>new URLSearchParams(window.location.search).get('view')==='logs')
+  const [logEntries, setLogEntries] = useState<AppLogEntry[]>([])
+  const [logFilter, setLogFilter] = useState<'all'|'error'>('all')
+  const [logSaveMessage, setLogSaveMessage] = useState('')
+  const logEndRef = useRef<HTMLDivElement | null>(null)
+  const lastLoggedRef = useRef<Record<string,string>>({})
   const [memoryProfile, setMemoryProfile] = useState<'auto'|'conservative'|'minimum'|'eight_gb'>('auto')
   const [managedStatus, setManagedStatus] = useState<ManagedRuntimeStatus | null>(null)
   const [managedMessage, setManagedMessage] = useState('')
@@ -180,6 +187,23 @@ function App() {
     ]).catch(()=>[] as Array<()=>void>)
     return ()=>{unlisteners.then(items=>items.forEach(fn=>fn()))}
   }, [])
+  useEffect(()=>{
+    let unlisten:(()=>void)|undefined
+    invoke<AppLogEntry[]>('app_log_list').then(setLogEntries).catch(()=>{})
+    listen<AppLogEntry>('app-log-entry',event=>setLogEntries(current=>[...current.slice(-1999),event.payload])).then(value=>unlisten=value)
+    return()=>unlisten?.()
+  },[])
+  useEffect(()=>{if(logConsoleOpen)logEndRef.current?.scrollIntoView({behavior:'smooth'})},[logConsoleOpen,logEntries,logFilter])
+  useEffect(()=>{
+    const autoDlLast=autoDlPrepareResult?.progress.at(-1)
+    const values:[string,string][]=[['运行环境',runtimeMessage],['模型',modelInstallMessage||modelError||modelLinkMessage],['H3 补丁',h3PatchMessage],['插件',pluginMessage||managedMessage],['生成',jobMessage],['远程 GPU',sshMessage],['更新',updateMessage],['保存路径',pathMessage],['AutoDL',autoDlLast?`${autoDlLast.stage} · ${autoDlLast.message}`:'']]
+    for(const [source,message] of values){
+      if(!message||lastLoggedRef.current[source]===message)continue
+      lastLoggedRef.current[source]=message
+      const level=/失败|错误|不可用|未通过|缺少|拒绝/i.test(message)?'error':/警告|实验|取消/i.test(message)?'warn':'info'
+      invoke('app_log_append',{level,source,message}).catch(()=>{})
+    }
+  },[runtimeMessage,modelInstallMessage,modelError,modelLinkMessage,h3PatchMessage,pluginMessage,managedMessage,jobMessage,sshMessage,updateMessage,pathMessage,autoDlPrepareResult?.progress])
   useEffect(()=>{try{localStorage.setItem('langbai-h3-draft',JSON.stringify({prompt,duration,steps,mode}))}catch{}},[prompt,duration,steps,mode])
   useEffect(()=>{try{localStorage.setItem('langbai-h3-output-path',outputPath)}catch{}},[outputPath])
   useEffect(()=>{try{localStorage.setItem('langbai-h3-output-mode',outputMode)}catch{}},[outputMode])
@@ -201,14 +225,14 @@ function App() {
             saved.push(await invoke<string>('comfy_save_output',{baseUrl:comfyUrl,asset,outputDirectory:outputPath}))
           }
           const sample=benchmarkRef.current
-          if(sample)await invoke('benchmark_save',{report:{schemaVersion:1,reportId:value.promptId,createdAt:Math.floor(Date.now()/1000),studioVersion:'0.10.2',executionTarget:sample.executionTarget,resourceSamplingSeconds:sample.resourceSamplingSeconds,gpuName:sample.gpuName||'未检测到',driverVersion:sample.driverVersion,vramTotalMb:sample.vramTotal,peakVramUsedMb:sample.peakVram,ramTotalMb:sample.ramTotal,peakRamUsedMb:sample.peakRam,runtimeVersion:comfyUrl,h3PatchCommit:h3Patch?.commit||'',generationMode:sample.mode,width:sample.width,height:sample.height,durationSeconds:sample.duration,steps:sample.steps,modelFile:sample.modelFile,enabledPlugins:Object.entries(pluginLock.plugins).filter(([,item])=>item.enabled).map(([id])=>id),elapsedSeconds:(Date.now()-sample.startedAt)/1000,outcome:'completed',errorSummary:'',outputFile:saved[0]||''}}).catch(()=>{})
+          if(sample)await invoke('benchmark_save',{report:{schemaVersion:1,reportId:value.promptId,createdAt:Math.floor(Date.now()/1000),studioVersion:'0.11.0',executionTarget:sample.executionTarget,resourceSamplingSeconds:sample.resourceSamplingSeconds,gpuName:sample.gpuName||'未检测到',driverVersion:sample.driverVersion,vramTotalMb:sample.vramTotal,peakVramUsedMb:sample.peakVram,ramTotalMb:sample.ramTotal,peakRamUsedMb:sample.peakRam,runtimeVersion:comfyUrl,h3PatchCommit:h3Patch?.commit||'',generationMode:sample.mode,width:sample.width,height:sample.height,durationSeconds:sample.duration,steps:sample.steps,modelFile:sample.modelFile,enabledPlugins:Object.entries(pluginLock.plugins).filter(([,item])=>item.enabled).map(([id])=>id),elapsedSeconds:(Date.now()-sample.startedAt)/1000,outcome:'completed',errorSummary:'',outputFile:saved[0]||''}}).catch(()=>{})
           benchmarkRef.current=null
           if(activeJobId)await invoke('update_job',{patch:{id:activeJobId,status:'completed',stage:'已完成',progress:1,planJson:null,outputPath:saved[0]||null,errorSummary:null}}).catch(()=>{})
           setJobMessage(saved.length?`生成完成，已保存到 ${saved.join('、')}`:'生成完成，但历史记录中没有视频输出')
           setActivePromptId('');setActiveJobId('');setGenerating(false)
         }else if(value.status==='failed'){
           const sample=benchmarkRef.current
-          if(sample)await invoke('benchmark_save',{report:{schemaVersion:1,reportId:value.promptId,createdAt:Math.floor(Date.now()/1000),studioVersion:'0.10.2',executionTarget:sample.executionTarget,resourceSamplingSeconds:sample.resourceSamplingSeconds,gpuName:sample.gpuName||'未检测到',driverVersion:sample.driverVersion,vramTotalMb:sample.vramTotal,peakVramUsedMb:sample.peakVram,ramTotalMb:sample.ramTotal,peakRamUsedMb:sample.peakRam,runtimeVersion:comfyUrl,h3PatchCommit:h3Patch?.commit||'',generationMode:sample.mode,width:sample.width,height:sample.height,durationSeconds:sample.duration,steps:sample.steps,modelFile:sample.modelFile,enabledPlugins:Object.entries(pluginLock.plugins).filter(([,item])=>item.enabled).map(([id])=>id),elapsedSeconds:(Date.now()-sample.startedAt)/1000,outcome:'failed',errorSummary:value.error||'ComfyUI 执行失败',outputFile:''}}).catch(()=>{})
+          if(sample)await invoke('benchmark_save',{report:{schemaVersion:1,reportId:value.promptId,createdAt:Math.floor(Date.now()/1000),studioVersion:'0.11.0',executionTarget:sample.executionTarget,resourceSamplingSeconds:sample.resourceSamplingSeconds,gpuName:sample.gpuName||'未检测到',driverVersion:sample.driverVersion,vramTotalMb:sample.vramTotal,peakVramUsedMb:sample.peakVram,ramTotalMb:sample.ramTotal,peakRamUsedMb:sample.peakRam,runtimeVersion:comfyUrl,h3PatchCommit:h3Patch?.commit||'',generationMode:sample.mode,width:sample.width,height:sample.height,durationSeconds:sample.duration,steps:sample.steps,modelFile:sample.modelFile,enabledPlugins:Object.entries(pluginLock.plugins).filter(([,item])=>item.enabled).map(([id])=>id),elapsedSeconds:(Date.now()-sample.startedAt)/1000,outcome:'failed',errorSummary:value.error||'ComfyUI 执行失败',outputFile:''}}).catch(()=>{})
           if(activeJobId)await invoke('update_job',{patch:{id:activeJobId,status:'failed',stage:'生成失败',progress:1,planJson:null,outputPath:null,errorSummary:value.error||'ComfyUI 执行失败'}}).catch(()=>{})
           benchmarkRef.current=null;setActivePromptId('');setActiveJobId('');setGenerating(false)
         }
@@ -520,6 +544,19 @@ function App() {
     }catch(error){setBenchmarkExportMessage(String(error))}
   }
 
+  const openLogConsole = async () => {
+    setLogConsoleOpen(true);setLogSaveMessage('')
+    try{setLogEntries(await invoke<AppLogEntry[]>('app_log_list'))}catch{}
+  }
+
+  const saveLogs = async (errorsOnly:boolean) => {
+    const destination=await save({defaultPath:errorsOnly?'langbai-h3-错误记录.log':'langbai-h3-运行日志.log',filters:[{name:'日志文件',extensions:['log','txt']}]})
+    if(typeof destination!=='string')return
+    try{const written=await invoke<string>('app_log_save',{destination,errorsOnly});setLogSaveMessage(`日志已保存：${written}`)}catch(error){setLogSaveMessage(String(error))}
+  }
+
+  const clearLogs = async () => {await invoke('app_log_clear').catch(()=>{});setLogEntries([]);setLogSaveMessage('日志已清空')}
+
   const choosePluginPackage = async () => {
     const selected=await open({multiple:false,filters:[{name:'H3 声明式插件',extensions:['h3plugin']}]})
     if(typeof selected!=='string')return
@@ -581,6 +618,7 @@ function App() {
           <div className="runtime-card"><div className="runtime-title"><span className={gpu?'status-dot':'status-dot idle'}/>{gpu ? '硬件检测完成' : '等待硬件检测'}</div><small>{gpu ? `${gpu.name} · ${(gpu.memoryTotalMb/1024).toFixed(0)} GB` : '连接运行环境后显示 GPU'}</small><div className="memory"><span style={{width:`${gpuPercent}%`}}/></div><small>{gpu ? `显存 ${(gpu.memoryUsedMb/1024).toFixed(1)} / ${(gpu.memoryTotalMb/1024).toFixed(0)} GB` : '显存信息不可用'}</small></div>
           <button className="nav-item" onClick={openSettings}><Settings/><span>设置</span></button>
           <button className="nav-item" onClick={()=>setHelpDialog(true)}><CircleHelp/><span>使用帮助</span></button>
+          <button className={logConsoleOpen?'nav-item active':'nav-item'} onClick={openLogConsole}><Terminal/><span>运行日志</span>{logEntries.some(item=>item.level==='error')&&<b>错误</b>}</button>
         </div>
       </aside>
 
@@ -773,7 +811,7 @@ function App() {
           <div className="url-row"><input id="output-path" value={outputPath} onChange={e=>{setOutputPath(e.target.value);setPathMessage('')}} /><button onClick={chooseOutputPath}>选择目录</button><button onClick={validatePath}>验证</button></div>
           {pathMessage && <div className={`probe-message ${pathMessage.includes('可写')?'success':'error'}`}><ShieldCheck/><span><strong>{pathMessage}</strong><small>后续任务可单独覆盖此目录。</small></span></div>}
           <div className="section-divider"><span>软件更新</span></div>
-          <div className="update-row"><div><strong>GitHub Releases</strong><small>当前 v0.10.2 · 包含预览版本 · 下载支持断点续传和 SHA-256 校验</small></div><button onClick={checkUpdate} disabled={checkingUpdate}>{checkingUpdate?'检查中…':'检查更新'}</button></div>
+          <div className="update-row"><div><strong>GitHub Releases</strong><small>当前 v0.11.0 · 包含预览版本 · 下载支持断点续传和 SHA-256 校验</small></div><button onClick={checkUpdate} disabled={checkingUpdate}>{checkingUpdate?'检查中…':'检查更新'}</button></div>
           {updateCandidate&&!downloadedUpdate&&<div className="update-candidate"><span><strong>{updateCandidate.version}</strong><small>{updateCandidate.fileName}</small></span><button onClick={downloadUpdate}>下载更新</button></div>}
           {updateProgress&&!downloadedUpdate&&<div className="runtime-progress"><div><span>更新下载</span><strong>{Math.round(updateProgress.progressPercent||0)}%</strong></div><div className="progress"><span style={{width:`${updateProgress.progressPercent||0}%`}}/></div><small>{updateProgress.bytesPerSecond?`${(updateProgress.bytesPerSecond/1024/1024).toFixed(1)} MB/s`:'正在准备'} {updateProgress.etaSeconds?`· 剩余约 ${Math.ceil(updateProgress.etaSeconds/60)} 分钟`:''}</small></div>}
           {downloadedUpdate&&<button className="primary wide update-install" onClick={launchUpdate}>关闭软件并安装 {downloadedUpdate.version}</button>}
@@ -784,6 +822,11 @@ function App() {
           <div className="benchmark-list">{benchmarkReports.length===0?<div className="empty-result">完成一次真实生成后，这里会显示采样观察显存、内存和耗时</div>:benchmarkReports.slice(0,5).map(item=><article key={item.reportId}><div className={`job-state ${item.outcome}`}>{item.outcome==='completed'?'通过':'失败'}</div><div><strong>{item.gpuName} · {item.executionTarget==='remote_autodl'?'AutoDL 远程':'本机'} · {item.generationMode.toUpperCase()}</strong><small>{item.width}×{item.height} · {item.durationSeconds}s · 耗时 {Math.round(item.elapsedSeconds)}s</small><span>{item.resourceSamplingSeconds?`${item.resourceSamplingSeconds} 秒采样观察显存 ${(item.peakVramUsedMb/1024).toFixed(1)}/${(item.vramTotalMb/1024).toFixed(1)} GB`:`远端资源采样待启用 · 显存总量 ${(item.vramTotalMb/1024).toFixed(1)} GB`} · 插件 {item.enabledPlugins.length}</span></div></article>)}</div>
         </section>
       </div>}
+      {logConsoleOpen&&<section className="log-console" aria-label="运行日志终端">
+        <header className="log-console-toolbar"><div className="log-console-status"><span className={managedStatus?.running?'status-dot':'status-dot idle'}/><strong>{managedStatus?.running?'ComfyUI 正在运行':'软件运行日志'}</strong><small>{logEntries.length} 条 · 最多显示 2000 条</small></div><div className="log-console-actions"><button className={logFilter==='all'?'selected':''} onClick={()=>setLogFilter('all')}>全部</button><button className={logFilter==='error'?'selected error':''} onClick={()=>setLogFilter('error')}>仅错误</button><button onClick={()=>saveLogs(false)}><Download/>保存全部</button><button onClick={()=>saveLogs(true)}><ShieldCheck/>保存报错</button><button onClick={clearLogs}><Trash2/>清空</button><button className="close-log" onClick={()=>setLogConsoleOpen(false)} aria-label="关闭运行日志"><X/></button></div></header>
+        <div className="log-terminal" role="log" aria-live="polite">{logEntries.filter(item=>logFilter==='all'||item.level==='error').length===0?<div className="log-empty"><Terminal/><strong>{logFilter==='error'?'目前没有错误记录':'等待运行日志'}</strong><span>启动运行环境、下载模型或生成视频后，日志会实时显示在这里。</span></div>:logEntries.filter(item=>logFilter==='all'||item.level==='error').map(item=><div className={`log-line ${item.level}`} key={item.id}><time>{new Date(item.timestampMs).toLocaleTimeString('zh-CN',{hour12:false})}</time><b>{item.level.toUpperCase()}</b><span className="log-source">[{item.source}]</span><code>{item.message}</code></div>)}<div ref={logEndRef}/></div>
+        <footer className="log-console-footer"><span>敏感凭据与用户目录会自动隐藏</span>{logSaveMessage&&<strong>{logSaveMessage}</strong>}</footer>
+      </section>}
     </div>
   )
 }
