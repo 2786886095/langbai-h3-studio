@@ -16,12 +16,14 @@ mod download;
 mod h3_patch;
 mod h3_workflow;
 mod job_store;
+mod managed_nodes;
 mod minimax_api;
 mod model_bundle;
 mod model_store;
 mod plugin_manager;
 mod runtime_installer;
 mod runtime_manager;
+mod ssh_tunnel;
 mod update_manager;
 mod workflow_registry;
 
@@ -264,6 +266,8 @@ struct StartH3GenerationInput {
     reference_image_size: String,
     output_directory: String,
     assets: Vec<LocalH3Asset>,
+    #[serde(default)]
+    acceleration: h3_workflow::H3Acceleration,
 }
 
 #[derive(Debug, Serialize)]
@@ -329,6 +333,7 @@ async fn start_h3_generation(input: StartH3GenerationInput) -> Result<StartedH3G
         reference_image_size: input.reference_image_size,
         assets: uploaded,
         filename_prefix: filename_prefix.clone(),
+        acceleration: input.acceleration,
     };
     let workflow = h3_workflow::build_h3_prompt(&request)?;
     let missing = workflow
@@ -1423,6 +1428,9 @@ pub fn run() {
             runtime_start,
             runtime_status,
             runtime_stop,
+            ssh_tunnel::ssh_tunnel_start,
+            ssh_tunnel::ssh_tunnel_status,
+            ssh_tunnel::ssh_tunnel_stop,
             comfy_submit_prompt,
             comfy_get_queue,
             comfy_get_history,
@@ -1445,9 +1453,14 @@ pub fn run() {
             minimax_api::minimax_api_key_delete,
             minimax_api::minimax_cloud_start,
             minimax_api::minimax_cloud_poll,
-            minimax_api::minimax_cloud_save
+            minimax_api::minimax_cloud_save,
+            managed_nodes::managed_nodes_catalog,
+            managed_nodes::managed_nodes_status,
+            managed_nodes::managed_nodes_install,
+            managed_nodes::managed_nodes_uninstall
         ])
         .manage(ManagedRuntimeState::default())
+        .manage(ssh_tunnel::SshTunnelState::default())
         .run(tauri::generate_context!())
         .expect("启动 Langbai H3 Studio 失败");
 }

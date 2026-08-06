@@ -50,6 +50,16 @@ pub struct H3WorkflowRequest {
     #[serde(default)]
     pub assets: Vec<UploadedAsset>,
     pub filename_prefix: String,
+    #[serde(default)]
+    pub acceleration: H3Acceleration,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum H3Acceleration {
+    #[default]
+    Native,
+    KJH3SageAttention,
 }
 
 fn default_ref_size() -> String {
@@ -137,6 +147,19 @@ pub fn build_h3_prompt(request: &H3WorkflowRequest) -> Result<Value, String> {
             json!({"unet_name":unet_name,"weight_dtype":"default"}),
         ),
     );
+    let model_node = match request.acceleration {
+        H3Acceleration::Native => "unet",
+        H3Acceleration::KJH3SageAttention => {
+            graph.insert(
+                "h3_sage_attention".into(),
+                node(
+                    "MiniMaxH3MemoryEfficientSageAttentionPatch",
+                    json!({"model":connection("unet",0)}),
+                ),
+            );
+            "h3_sage_attention"
+        }
+    };
     graph.insert("clip".into(), node("CLIPLoader", json!({"clip_name":"qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors","type":"minimax","device":"default"})));
     graph.insert(
         "video_vae".into(),
@@ -256,12 +279,12 @@ pub fn build_h3_prompt(request: &H3WorkflowRequest) -> Result<Value, String> {
         "sampler".into(),
         node("KSamplerSelect", json!({"sampler_name":"res_multistep"})),
     );
-    graph.insert("scheduler".into(), node("BasicScheduler", json!({"model":connection("unet",0),"scheduler":"simple","steps":request.steps,"denoise":1.0})));
+    graph.insert("scheduler".into(), node("BasicScheduler", json!({"model":connection(model_node,0),"scheduler":"simple","steps":request.steps,"denoise":1.0})));
     graph.insert(
         "guider".into(),
         node(
             "BasicGuider",
-            json!({"model":connection("unet",0),"conditioning":connection("condition",0)}),
+            json!({"model":connection(model_node,0),"conditioning":connection("condition",0)}),
         ),
     );
     graph.insert("sample".into(), node("SamplerCustomAdvanced", json!({"noise":connection("noise",0),"guider":connection("guider",0),"sampler":connection("sampler",0),"sigmas":connection("scheduler",0),"latent_image":connection("condition",1)})));
@@ -299,6 +322,7 @@ mod tests {
             reference_image_size: "match".into(),
             assets: vec![],
             filename_prefix: "video/job-1".into(),
+            acceleration: H3Acceleration::Native,
         }
     }
     #[test]
@@ -343,6 +367,29 @@ mod tests {
         assert_eq!(
             g["condition"]["inputs"]["ref_video_audios.ref_video_audio_0"],
             json!(["ref_video_parts_0", 1])
+        );
+    }
+
+    #[test]
+    fn h3_sage_patch_is_inserted_between_loader_and_consumers() {
+        let mut r = base(H3Mode::T2v);
+        r.acceleration = H3Acceleration::KJH3SageAttention;
+        let g = build_h3_prompt(&r).unwrap();
+        assert_eq!(
+            g["h3_sage_attention"]["class_type"],
+            "MiniMaxH3MemoryEfficientSageAttentionPatch"
+        );
+        assert_eq!(
+            g["h3_sage_attention"]["inputs"]["model"],
+            json!(["unet", 0])
+        );
+        assert_eq!(
+            g["scheduler"]["inputs"]["model"],
+            json!(["h3_sage_attention", 0])
+        );
+        assert_eq!(
+            g["guider"]["inputs"]["model"],
+            json!(["h3_sage_attention", 0])
         );
     }
 }

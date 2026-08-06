@@ -83,6 +83,23 @@ fn memory_profiles_emit_only_known_comfy_arguments() {
         )
         .unwrap();
     assert!(minimum.args.contains(&"--novram".into()));
+    assert!(minimum.args.contains(&"--cpu-vae".into()));
+    assert!(minimum.args.contains(&"--disable-smart-memory".into()));
+    let eight = manager
+        .launch_plan_with_memory_profile(
+            "python/python.exe",
+            "ComfyUI/main.py",
+            MemoryProfile::EightGb,
+        )
+        .unwrap();
+    assert!(eight.args.contains(&"--cpu-vae".into()));
+    assert!(!eight.args.contains(&"--novram".into()));
+    assert!(
+        eight
+            .args
+            .windows(2)
+            .any(|v| v == ["--reserve-vram", "1.0"])
+    );
     fs::remove_dir_all(root).unwrap();
 }
 

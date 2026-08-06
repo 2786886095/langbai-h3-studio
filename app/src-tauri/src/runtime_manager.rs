@@ -90,6 +90,7 @@ pub enum MemoryProfile {
     Auto,
     Conservative,
     Minimum,
+    EightGb,
 }
 
 impl MemoryProfile {
@@ -97,7 +98,14 @@ impl MemoryProfile {
         match self {
             Self::Auto => &[],
             Self::Conservative => &["--lowvram", "--reserve-vram", "1.5"],
-            Self::Minimum => &["--novram", "--reserve-vram", "1.5"],
+            Self::Minimum => &[
+                "--novram",
+                "--cpu-vae",
+                "--disable-smart-memory",
+                "--reserve-vram",
+                "1.0",
+            ],
+            Self::EightGb => &["--cpu-vae", "--reserve-vram", "1.0"],
         }
     }
 }

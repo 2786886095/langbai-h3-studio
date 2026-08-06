@@ -35,6 +35,9 @@ type Engine = 'local'|'cloud'
 type ApiKeyStatus = {configured:boolean;maskedHint?:string}
 type CloudStart = {taskId:string;status?:string}
 type CloudPoll = {status:'queued'|'running'|'completed'|'failed';taskId:string;progress?:number;fileId?:string;error?:string}
+type ManagedNodeItem = {id:string;name:string;repository:string;commit:string;license:string;category:string;evidenceLevel:string;evidenceUrl:string;requiredNodes:string[];experimental:boolean;installable:boolean;description:string}
+type ManagedNodeState = {id:string;installed:boolean;installedCommit?:string;restartRequired:boolean;verified:boolean;category:string;evidenceLevel:string}
+type SshTunnelStatus = {running:boolean;pid?:number;endpoint?:string;localPort?:number;startedAt?:number;exitCode?:number;phase:'starting'|'ready'|'stopped'|'failed';errorCode?:string;error?:string}
 
 const modeContent = {
   text: { title: '文字生成视频', desc: '只需描述画面、镜头和声音，适合从零开始创作。' },
@@ -106,7 +109,7 @@ function App() {
   const [helpDialog, setHelpDialog] = useState(false)
   const benchmarkRef = useRef<BenchmarkState | null>(null)
   const [benchmarkReports, setBenchmarkReports] = useState<BenchmarkReport[]>([])
-  const [memoryProfile, setMemoryProfile] = useState<'auto'|'conservative'|'minimum'>('auto')
+  const [memoryProfile, setMemoryProfile] = useState<'auto'|'conservative'|'minimum'|'eight_gb'>('auto')
   const [managedStatus, setManagedStatus] = useState<ManagedRuntimeStatus | null>(null)
   const [managedMessage, setManagedMessage] = useState('')
   const [workflowDialog, setWorkflowDialog] = useState(false)
@@ -116,8 +119,23 @@ function App() {
   const [apiKeyMessage, setApiKeyMessage] = useState('')
   const [cloudResolution, setCloudResolution] = useState<'768P'|'1080P'>('768P')
   const [cloudTask, setCloudTask] = useState<CloudPoll|null>(null)
+  const [localResolution, setLocalResolution] = useState<'608x352'|'736x416'|'1344x768'>('1344x768')
+  const [managedNodeCatalog, setManagedNodeCatalog] = useState<ManagedNodeItem[]>([])
+  const [managedNodeStates, setManagedNodeStates] = useState<ManagedNodeState[]>([])
+  const [managedNodeBusy, setManagedNodeBusy] = useState('')
+  const [managedNodeProgress, setManagedNodeProgress] = useState<TransferProgress|null>(null)
+  const [acceleration, setAcceleration] = useState<'native'|'kj_h3_sage_attention'>('native')
+  const [sshHost, setSshHost] = useState('')
+  const [sshUser, setSshUser] = useState('root')
+  const [sshPort, setSshPort] = useState(22)
+  const [sshRemotePort, setSshRemotePort] = useState(8188)
+  const [sshIdentity, setSshIdentity] = useState('')
+  const [sshKnownHosts, setSshKnownHosts] = useState('')
+  const [sshStatus, setSshStatus] = useState<SshTunnelStatus|null>(null)
+  const [sshMessage, setSshMessage] = useState('')
+  const [sshBusy, setSshBusy] = useState(false)
   useEffect(() => {
-    invoke<SystemProbe>('probe_system').then(value=>{setSystem(value);if(value.gpu&&value.gpu.memoryTotalMb<16000)setMemoryProfile('conservative')}).catch(() => {})
+    invoke<SystemProbe>('probe_system').then(value=>{setSystem(value);if(value.gpu&&value.gpu.memoryTotalMb<10000){setMemoryProfile('eight_gb');setLocalResolution('608x352')}else if(value.gpu&&value.gpu.memoryTotalMb<16000)setMemoryProfile('conservative')}).catch(() => {})
     invoke<RuntimeManifest[]>('runtime_manifests').then(setRuntimeManifests).catch(()=>{})
     invoke<ModelBundle[]>('model_bundles').then(setModelBundles).catch(()=>{})
     invoke<H3PatchManifest>('h3_preview_patch_manifest').then(setH3Patch).catch(()=>{})
@@ -129,6 +147,7 @@ function App() {
       listen<ModelDownloadEvent>('model-download-progress', event=>setModelProgress(event.payload.progress)),
       listen<TransferProgress>('h3-patch-download-progress', event=>setH3PatchProgress(event.payload)),
       listen<TransferProgress>('update-download-progress', event=>setUpdateProgress(event.payload)),
+      listen<TransferProgress>('managed-node-download-progress', event=>setManagedNodeProgress(event.payload)),
     ]).catch(()=>[] as Array<()=>void>)
     return ()=>{unlisteners.then(items=>items.forEach(fn=>fn()))}
   }, [])
@@ -172,6 +191,7 @@ function App() {
   const gpu = system?.gpu
   const gpuPercent = gpu ? Math.min(100, Math.round(gpu.memoryUsedMb / gpu.memoryTotalMb * 100)) : 31
   const h3Ready = !!probeResult && (h3Patch?.requiredNodes || []).every(node=>probeResult.h3RelatedNodes.includes(node))
+  const kjSageReady = !!probeResult?.h3RelatedNodes.includes('MiniMaxH3MemoryEfficientSageAttentionPatch')
 
   const selectEngine=(value:Engine)=>{setEngine(value);setEngineDialog(false);setJobMessage('');if(value==='cloud'&&mode==='reference'){setMode('text');setAssets([])}if(value==='cloud'&&!([6,10] as number[]).includes(duration))setDuration(6)}
   const saveApiKey=async()=>{if(!apiKey.trim()){setApiKeyMessage('请输入 API Key');return}try{await invoke('minimax_api_key_set',{apiKey:apiKey.trim()});setApiKey('');setApiKeyStatus({configured:true});setApiKeyMessage('密钥已加密保存，界面不会回显')}catch(error){setApiKeyMessage(String(error))}}
@@ -233,11 +253,13 @@ function App() {
       try{setJobMessage('正在安全提交 MiniMax 云端任务…');const started=await invoke<CloudStart>('minimax_cloud_start',{input:{prompt,mode:mode==='text'?'text':assets.length>1?'first_last_frames':'first_frame',model:mode==='frames'&&assets.length>1?'Hailuo-02':'Hailuo-2.3',resolution:cloudResolution,durationSeconds:duration,assets:assets.map(({path,role})=>({path,role}))}});setCloudTask({taskId:started.taskId,status:'queued',progress:0});setJobMessage(`云端任务 ${started.taskId} 已提交`)}catch(error){setJobMessage(String(error));setGenerating(false)}return
     }
     const workflowMode=mode==='text'?'t2v':mode==='frames'?'fl2va':'ref2va'
-    const request = { mode:workflowMode, prompt, width:1344, height:768, durationSeconds:duration, seed:Date.now(), steps, referenceImageSize:'match', outputDirectory:outputPath, baseUrl:comfyUrl, assets:assets.map(({path,mime,kind,role})=>({path,mime,kind,role})) }
+    if(acceleration==='kj_h3_sage_attention'&&!kjSageReady){setJobMessage('请先安装 KJNodes、重启托管 Runtime 并重新检测 H3 SageAttention 节点');setGenerating(false);return}
+    const [localWidth,localHeight]=localResolution.split('x').map(Number)
+    const request = { mode:workflowMode, prompt, width:localWidth, height:localHeight, durationSeconds:duration, seed:Date.now(), steps, referenceImageSize:'match', acceleration, outputDirectory:outputPath, baseUrl:comfyUrl, assets:assets.map(({path,mime,kind,role})=>({path,mime,kind,role})) }
     try {
       setJobMessage(assets.length?'正在上传素材并编译工作流…':'正在编译并提交工作流…')
       const started=await invoke<StartedGeneration>('start_h3_generation',{input:request})
-      benchmarkRef.current={startedAt:Date.now(),mode:workflowMode,width:1344,height:768,duration,steps,modelFile:workflowMode==='ref2va'?'minimax_h3_ref2va_pruned_int8_convrot.safetensors':'minimax_h3_fl2va_pruned_int8_convrot.safetensors',gpuName:system?.gpu?.name||'',driverVersion:system?.gpu?.driverVersion||'',vramTotal:system?.gpu?.memoryTotalMb||0,peakVram:system?.gpu?.memoryUsedMb||0,ramTotal:system?.memoryTotalMb||0,peakRam:system?.memoryUsedMb||0}
+      benchmarkRef.current={startedAt:Date.now(),mode:workflowMode,width:localWidth,height:localHeight,duration,steps,modelFile:workflowMode==='ref2va'?'minimax_h3_ref2va_pruned_int8_convrot.safetensors':'minimax_h3_fl2va_pruned_int8_convrot.safetensors',gpuName:system?.gpu?.name||'',driverVersion:system?.gpu?.driverVersion||'',vramTotal:system?.gpu?.memoryTotalMb||0,peakVram:system?.gpu?.memoryUsedMb||0,ramTotal:system?.memoryTotalMb||0,peakRam:system?.memoryUsedMb||0}
       const job = await invoke<{id:string}>('create_job', { input:{ name:`${modeContent[mode].title} · ${new Date().toLocaleTimeString()}`, requestJson:JSON.stringify({...request,promptId:started.promptId}), backendId:started.promptId } })
       setActivePromptId(started.promptId);setGenerationPoll({status:'queued',promptId:started.promptId,queuePosition:started.queueNumber,outputs:[]})
       setJobMessage(`任务 ${job.id} 已提交 ComfyUI${started.queueNumber!==undefined?` · 队列编号 ${started.queueNumber}`:''}`)
@@ -297,6 +319,21 @@ function App() {
     catch(error){setManagedMessage(String(error))}
   }
 
+  const chooseSshFile = async (kind:'identity'|'knownHosts') => {
+    const selected=await open({multiple:false,title:kind==='identity'?'选择 SSH 私钥':'选择已核验的 known_hosts 文件'})
+    if(typeof selected==='string'){if(kind==='identity')setSshIdentity(selected);else setSshKnownHosts(selected)}
+  }
+
+  const startSshTunnel = async () => {
+    setSshBusy(true);setSshMessage('正在建立加密隧道并等待远端 ComfyUI…')
+    try{const value=await invoke<SshTunnelStatus>('ssh_tunnel_start',{config:{host:sshHost,user:sshUser,port:sshPort,identityFile:sshIdentity,knownHostsFile:sshKnownHosts,remoteComfyPort:sshRemotePort}});setSshStatus(value);if(value.endpoint){setComfyUrl(value.endpoint);setSshMessage(`远程 RTX 工作站已通过本地加密隧道连接 · ${value.endpoint}`);setProbeResult(null)}}
+    catch(error){setSshMessage(String(error))}finally{setSshBusy(false)}
+  }
+
+  const stopSshTunnel = async () => {
+    try{const value=await invoke<SshTunnelStatus>('ssh_tunnel_stop');setSshStatus(value);setSshMessage('远程 SSH 隧道已断开');setProbeResult(null)}catch(error){setSshMessage(String(error))}
+  }
+
   const checkUpdate = async () => {
     setCheckingUpdate(true);setUpdateMessage('');setUpdateCandidate(null);setDownloadedUpdate(null)
     try{
@@ -318,7 +355,21 @@ function App() {
 
   const openPlugins = async () => {
     setPluginDialog(true);setPluginMessage('');setPluginInspection(null)
-    try{setPluginLock(await invoke<PluginLock>('plugin_list'))}catch(error){setPluginMessage(String(error))}
+    try{
+      const [lock,catalog,states]=await Promise.all([invoke<PluginLock>('plugin_list'),invoke<ManagedNodeItem[]>('managed_nodes_catalog'),invoke<ManagedNodeState[]>('managed_nodes_status')])
+      setPluginLock(lock);setManagedNodeCatalog(catalog);setManagedNodeStates(states)
+    }catch(error){setPluginMessage(String(error))}
+  }
+
+  const installManagedNode = async (id:string) => {
+    setManagedNodeBusy(id);setManagedNodeProgress({phase:'preparing',progressPercent:0});setPluginMessage('正在下载、校验并安装固定版本社区节点…')
+    try{await invoke('managed_nodes_install',{id});setManagedNodeStates(await invoke<ManagedNodeState[]>('managed_nodes_status'));setPluginMessage('社区节点已安装；请重启托管 Runtime 并重新检测节点后再启用')}
+    catch(error){setPluginMessage(String(error))}finally{setManagedNodeBusy('')}
+  }
+
+  const uninstallManagedNode = async (id:string) => {
+    setManagedNodeBusy(id);try{await invoke('managed_nodes_uninstall',{id});setManagedNodeStates(await invoke<ManagedNodeState[]>('managed_nodes_status'));if(id==='kijai.comfyui-kjnodes')setAcceleration('native');setPluginMessage('社区节点已卸载；重启 Runtime 后生效')}
+    catch(error){setPluginMessage(String(error))}finally{setManagedNodeBusy('')}
   }
 
   const openSettings = async () => {
@@ -411,12 +462,12 @@ function App() {
               <div className="setting-grid">
                 <div className="field"><label>画面比例</label><button className="select"><span><span className="ratio-icon wide"/>16:9 · 横屏</span><ChevronDown/></button></div>
                 <div className="field"><label>视频时长</label><div className={`segmented ${engine==='cloud'?'two-options':''}`}>{(engine==='cloud'?(cloudResolution==='1080P'?[6]:[6,10]):[5,8,10,15]).map(n=><button key={n} onClick={()=>setDuration(n)} className={duration===n?'active':''}>{n} 秒</button>)}</div></div>
-                <div className="field"><label>生成质量</label>{engine==='cloud'?<div className="segmented two-options">{(['768P','1080P'] as const).map(value=><button key={value} onClick={()=>{setCloudResolution(value);if(value==='1080P')setDuration(6)}} className={cloudResolution===value?'active':''}>{value}</button>)}</div>:<button className="select"><span><ShieldCheck/> 标准 · 768p</span><ChevronDown/></button>}</div>
+                <div className="field"><label>生成质量</label>{engine==='cloud'?<div className="segmented two-options">{(['768P','1080P'] as const).map(value=><button key={value} onClick={()=>{setCloudResolution(value);if(value==='1080P')setDuration(6)}} className={cloudResolution===value?'active':''}>{value}</button>)}</div>:<div className="segmented resolution-options">{(['608x352','736x416','1344x768'] as const).map(value=><button key={value} onClick={()=>setLocalResolution(value)} className={localResolution===value?'active':''}>{value}</button>)}</div>}</div>
                 <div className="field"><label>随机种子 <Info/></label><button className="select"><span>自动随机</span><RotateCcw/></button></div>
               </div>
 
               {engine==='local'&&<><button className="advanced-toggle" onClick={()=>setAdvanced(!advanced)}><span><Settings/> 高级设置 <small>采样、卸载与加速选项</small></span><ChevronDown className={advanced?'rotated':''}/></button>
-              {advanced && <div className="advanced-panel"><div><label>采样步数 <b>{steps}</b></label><input type="range" min="12" max="50" value={steps} onChange={event=>setSteps(Number(event.target.value))}/></div><div><label>显存策略</label><button className="select" onClick={()=>setEngineDialog(true)}><span>{memoryProfile==='auto'?'自动动态显存':memoryProfile==='conservative'?'保守低显存':'最小显存'}</span><ChevronDown/></button></div><div><label>加速方案</label><button className="select" onClick={openPlugins}><span><Zap/> {Object.entries(pluginLock.plugins).filter(([,item])=>item.enabled).length?`${Object.entries(pluginLock.plugins).filter(([,item])=>item.enabled).length} 个插件已启用`:'使用 ComfyUI 原生优化'}</span><ChevronDown/></button></div></div>}</>}
+              {advanced && <div className="advanced-panel"><div><label>采样步数 <b>{steps}</b></label><input type="range" min="12" max="50" value={steps} onChange={event=>setSteps(Number(event.target.value))}/></div><div><label>显存策略</label><button className="select" onClick={()=>setEngineDialog(true)}><span>{memoryProfile==='auto'?'自动动态显存':memoryProfile==='conservative'?'保守低显存':memoryProfile==='eight_gb'?'8GB 极低显存实验':'最小显存'}</span><ChevronDown/></button></div><div><label>加速方案</label><button className="select" onClick={openPlugins}><span><Zap/> {acceleration==='kj_h3_sage_attention'?'KJNodes H3 SageAttention（实验）':'官方 INT8 + NVFP4 原生方案'}</span><ChevronDown/></button></div></div>}</>}
             </section>
 
             <aside className="summary-card">
@@ -455,9 +506,18 @@ function App() {
           {runtimeProgress && <div className="runtime-progress"><div><span>{runtimeProgress.phase}</span><strong>{Math.round(runtimeProgress.progressPercent || 0)}%</strong></div><div className="progress"><span style={{width:`${runtimeProgress.progressPercent || 0}%`}}/></div><small>{runtimeProgress.bytesPerSecond?`${(runtimeProgress.bytesPerSecond/1024/1024).toFixed(1)} MB/s`:runtimeProgress.currentFile||'正在准备'} {runtimeProgress.etaSeconds?`· 剩余约 ${Math.ceil(runtimeProgress.etaSeconds/60)} 分钟`:''}</small></div>}
           {runtimeMessage && <div className={`probe-message ${runtimeMessage.includes('已安装')?'success':'error'}`}><ShieldCheck/><span><strong>{runtimeMessage}</strong><small>下载支持断点续传，安装前会验证官方 SHA-256。</small></span></div>}
           <div className="section-divider"><span>托管环境启动策略</span></div>
-          <div className="memory-profiles">{([{id:'auto',name:'自动动态显存',desc:'推荐 16–24GB；使用 ComfyUI 默认动态卸载'},{id:'conservative',name:'保守低显存',desc:'推荐 12–16GB 实验使用；启用 lowvram 并预留 1.5GB'},{id:'minimum',name:'最小显存',desc:'极慢兜底；大部分权重放在内存'}] as const).map(item=><button key={item.id} className={memoryProfile===item.id?'selected':''} onClick={()=>setMemoryProfile(item.id)}><strong>{item.name}</strong><small>{item.desc}</small></button>)}</div>
+          <div className="memory-profiles">{([{id:'auto',name:'自动动态显存',desc:'推荐 16–24GB；使用 ComfyUI 默认动态卸载'},{id:'conservative',name:'保守低显存',desc:'推荐 12–16GB 实验使用；启用 lowvram 并预留 1.5GB'},{id:'eight_gb',name:'8GB 极低显存实验',desc:'8–10GB；默认动态卸载 + CPU VAE，建议至少 64GB 内存和充足页面文件'},{id:'minimum',name:'极限卸载诊断',desc:'novram + CPU VAE + 强制卸载；默认方案仍 OOM 时再尝试，可能非常慢'}] as const).map(item=><button key={item.id} className={memoryProfile===item.id?'selected':''} onClick={()=>{setMemoryProfile(item.id);if(item.id==='eight_gb')setLocalResolution('608x352')}}><strong>{item.name}</strong><small>{item.desc}</small></button>)}</div>
+          {memoryProfile==='eight_gb'&&<div className="modal-note warning"><Info/><span><strong>8GB 是实验运行目标</strong><small>官方量化模型文件总量约 42GB，权重会大量卸载到系统内存；建议先用 5 秒、较低分辨率和单一素材验证。运行成功与速度仍需按显卡、内存和驱动记录实测。</small></span></div>}
           <div className="runtime-actions"><button onClick={startManagedRuntime} disabled={managedStatus?.running}>启动托管环境</button><button onClick={stopManagedRuntime} disabled={!managedStatus?.running}>停止</button></div>
           {managedMessage&&<div className={`probe-message ${managedMessage.includes('已启动')||managedMessage.includes('已停止')?'success':'error'}`}><Cpu/><span><strong>{managedMessage}</strong><small>{managedStatus?.pid?`进程 PID ${managedStatus.pid}`:'启动参数只由内置显存档位生成'}</small></span></div>}
+          <div className="section-divider"><span>租用 RTX 5090 / 远程工作站</span></div>
+          <p>Studio 使用 Windows OpenSSH 把远端 127.0.0.1:8188 转发到本机随机端口。远端 ComfyUI 不需要开放公网端口。</p>
+          <div className="ssh-grid"><label>SSH 主机<input value={sshHost} onChange={e=>setSshHost(e.target.value)} placeholder="GPU_SERVER_IP"/></label><label>用户名<input value={sshUser} onChange={e=>setSshUser(e.target.value)} /></label><label>SSH 端口<input type="number" min="1" max="65535" value={sshPort} onChange={e=>setSshPort(Number(e.target.value))}/></label><label>远端 ComfyUI 端口<input type="number" min="1" max="65535" value={sshRemotePort} onChange={e=>setSshRemotePort(Number(e.target.value))}/></label></div>
+          <label>SSH 私钥</label><div className="url-row"><input value={sshIdentity} readOnly placeholder="选择专用 SSH 私钥"/><button onClick={()=>chooseSshFile('identity')}>选择</button></div>
+          <label>known_hosts</label><div className="url-row"><input value={sshKnownHosts} readOnly placeholder="选择已从租用商核验指纹的 known_hosts"/><button onClick={()=>chooseSshFile('knownHosts')}>选择</button></div>
+          <div className="runtime-actions"><button onClick={startSshTunnel} disabled={sshBusy||sshStatus?.running||!sshHost||!sshIdentity||!sshKnownHosts}>{sshBusy?'连接中…':'连接远程 GPU'}</button><button onClick={stopSshTunnel} disabled={!sshStatus?.running}>断开隧道</button></div>
+          {sshMessage&&<div className={`probe-message ${sshStatus?.running||sshMessage.includes('已断开')?'success':'error'}`}><ShieldCheck/><span><strong>{sshMessage}</strong><small>{sshStatus?.running?`SSH PID ${sshStatus.pid} · 远端算力，本机保存结果`:'严格校验主机密钥；不会自动信任未知服务器'}</small></span></div>}
+          <div className="modal-note warning"><Info/><span><strong>远端安全前置条件</strong><small>远端 ComfyUI 只监听 127.0.0.1，云服务器防火墙只开放 SSH；首次连接前请从租用商控制台核对主机指纹并准备 known_hosts。</small></span></div>
           <div className="section-divider"><span>或连接已有环境</span></div>
           <p>输入本机 ComfyUI 地址。探测只读取版本和节点能力，不修改现有环境。</p>
           <label htmlFor="comfy-url">ComfyUI 地址</label>
@@ -494,6 +554,11 @@ function App() {
         <section className="modal model-modal" role="dialog" aria-modal="true" aria-labelledby="plugin-title">
           <div className="modal-head"><div><span className="eyebrow"><Zap/> 扩展能力</span><h2 id="plugin-title">加速插件</h2></div><button className="icon-button" onClick={()=>setPluginDialog(false)} aria-label="关闭对话框"><X/></button></div>
           <p>只安装声明式 `.h3plugin` 适配包。包内脚本和二进制会被拒绝；外部 ComfyUI 节点仍由用户或 Runtime 独立管理。</p>
+          <div className="section-divider"><span>托管社区节点目录</span></div>
+          <div className="plugin-list managed-catalog">{managedNodeCatalog.map(item=>{const state=managedNodeStates.find(value=>value.id===item.id);const isKj=item.id==='kijai.comfyui-kjnodes';return <article key={item.id}><div className="model-icon"><Zap/></div><div><strong>{item.name}</strong><small>{item.category==='h3-acceleration'?'H3 专用显存优化':'H3 社区兼容扩展'} · {item.license} · 固定 {item.commit.slice(0,8)}</small><span>{item.description}</span><span>证据：源码支持 · 实际性能尚待本机基准验证</span></div>{state?.installed?<><button disabled={isKj&&!kjSageReady} onClick={()=>isKj&&setAcceleration(acceleration==='kj_h3_sage_attention'?'native':'kj_h3_sage_attention')}>{isKj?(kjSageReady?(acceleration==='kj_h3_sage_attention'?'已用于工作流':'启用加速'):'重启并检测'):'已安装'}</button><button className="danger-link" disabled={managedNodeBusy===item.id} onClick={()=>uninstallManagedNode(item.id)}>卸载</button></>:<button disabled={!item.installable||!!managedNodeBusy} onClick={()=>installManagedNode(item.id)}>{managedNodeBusy===item.id?'安装中…':'安装固定版本'}</button>}</article>})}</div>
+          {managedNodeProgress&&managedNodeBusy&&<div className="runtime-progress"><div><span>下载社区节点</span><strong>{Math.round(managedNodeProgress.progressPercent||0)}%</strong></div><div className="progress"><span style={{width:`${managedNodeProgress.progressPercent||0}%`}}/></div><small>{managedNodeProgress.bytesPerSecond?`${(managedNodeProgress.bytesPerSecond/1024/1024).toFixed(1)} MB/s`:'正在准备'}</small></div>}
+          <div className="modal-note warning"><Info/><span><strong>兼容证据不等于性能承诺</strong><small>KJNodes 的 H3 SageAttention 是实验节点，只有源码适配证据；启用后 Studio 会把它真实插入 UNETLoader 与采样器之间，并单独记录基准结果。GGUF、TeaCache 当前没有 H3 支持证据，因此不展示。</small></span></div>
+          <div className="section-divider"><span>声明式工作流适配包</span></div>
           <button className="primary wide" onClick={choosePluginPackage}>导入 .h3plugin 文件</button>
           {pluginInspection&&<div className="plugin-inspection"><div><strong>{pluginInspection.package.manifest.name}</strong><span>v{pluginInspection.package.manifest.version} · {pluginInspection.package.manifest.license||'许可证未声明'}</span></div><div className="capability-tags">{pluginInspection.compatibility.provides.map(item=><span key={item}>{item}</span>)}</div>{pluginInspection.compatibility.reasons.map(item=><small key={item}>{item}</small>)}<button onClick={installPlugin} disabled={!pluginInspection.compatibility.compatible}>{pluginInspection.compatibility.compatible?'安装并启用':'当前环境不兼容'}</button></div>}
           <div className="section-divider"><span>已安装</span></div>

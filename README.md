@@ -1,5 +1,16 @@
 # Langbai H3 Studio
 
+## v0.8.0：8GB 实验档与远程 RTX 5090
+
+- 8–10GB NVIDIA 显卡提供未验证的极低显存档：CPU VAE、608×352 起步和极限卸载诊断
+- 通过 Windows OpenSSH 隧道安全连接租用 RTX 5090 或其他远程 GPU 工作站
+- 首批真实托管社区节点目录：KJNodes H3 SageAttention 与 FunPack H3 兼容扩展
+- KJNodes H3 SageAttention 可真实插入生成 API Graph，并单独记录兼容性结果
+
+8GB 目前是实验目标，不是稳定兼容保证。远端方案要求 ComfyUI 只监听远端
+`127.0.0.1`，不应开放公网 8188。参见 [8GB 实验档](docs/H3_8GB_EXPERIMENT.md)
+和 [远程 GPU 连接](docs/REMOTE_GPU.md)。
+
 ## v0.7.0 云端 Hailuo API
 
 除本地 MiniMax-H3 / ComfyUI 外，Studio 现已提供独立的 **MiniMax 云端 Hailuo API** 模式：

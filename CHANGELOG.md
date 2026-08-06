@@ -1,5 +1,23 @@
 # 更新记录
 
+## 0.8.0 - 2026-08-06
+
+### 新增
+
+- 8–10GB NVIDIA 极低显存实验档：CPU VAE、1GB 显存预留与 608×352 起步规格
+- 极限卸载诊断档：novram、CPU VAE 和强制智能内存关闭
+- Windows OpenSSH 隧道连接租用 RTX 5090 / 远程 GPU 工作站
+- 固定主机密钥校验、专用 known_hosts、随机本地回环端口和远端 ComfyUI 就绪检测
+- 固定提交与 SHA-256 的 KJNodes、FunPack 托管社区节点目录
+- KJNodes MiniMaxH3MemoryEfficientSageAttentionPatch 真实 API Graph 接入
+- 本地 608×352、736×416、1344×768 分辨率控制
+
+### 事实边界
+
+- 8GB 尚无真实 H3 完整推理证据，继续标记为未验证实验目标
+- KJNodes H3 SageAttention 有源码适配证据，但没有 8GB 成功率或提速数据
+- GGUF 和 TeaCache 没有 H3 支持证据，因此不展示为可用加速
+
 ## 0.7.0 - 2026-08-06
 
 ### 新增
