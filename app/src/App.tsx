@@ -20,6 +20,7 @@ type TransferProgress = { phase:string;downloadedBytes?:number;totalBytes?:numbe
 type ModelBundle = { id:string;name:string;variant:string;revision:string;license:string;licenseUrl:string;recommendedVramGb:number;recommendedRamGb:number;files:Array<{relativePath:string;size:number;sha256:string}> }
 type ModelBundleFileEvent = { bundleId:string;index:number;count:number;relativePath:string;size:number }
 type ModelDownloadEvent = { relativePath:string;progress:TransferProgress }
+type H3PatchManifest = { id:string;commit:string;pullRequest:number;url:string;sha256:string;size:number;requiredNodes:string[];status:string }
 type LocalAsset = { path:string;name:string;size:number;mime:string;kind:'image'|'video'|'audio';role:'start_frame'|'end_frame'|'reference'|'motion_reference'|'audio_reference';status:'selected'|'uploading'|'ready'|'error';remoteName?:string;error?:string }
 
 const modeContent = {
@@ -66,12 +67,14 @@ function App() {
   const [modelProgress, setModelProgress] = useState<TransferProgress | null>(null)
   const [assets, setAssets] = useState<LocalAsset[]>([])
   const [assetError, setAssetError] = useState('')
+  const [h3Patch, setH3Patch] = useState<H3PatchManifest | null>(null)
   const estimate = useMemo(() => duration <= 6 ? '约 8–12 分钟' : duration <= 10 ? '约 14–20 分钟' : '约 22–30 分钟', [duration])
 
   useEffect(() => {
     invoke<SystemProbe>('probe_system').then(setSystem).catch(() => {})
     invoke<RuntimeManifest[]>('runtime_manifests').then(setRuntimeManifests).catch(()=>{})
     invoke<ModelBundle[]>('model_bundles').then(setModelBundles).catch(()=>{})
+    invoke<H3PatchManifest>('h3_preview_patch_manifest').then(setH3Patch).catch(()=>{})
     const unlisteners = Promise.all([
       listen<TransferProgress>('runtime-download-progress', event=>setRuntimeProgress(event.payload)),
       listen<TransferProgress>('runtime-install-progress', event=>setRuntimeProgress(event.payload)),
@@ -82,6 +85,7 @@ function App() {
   }, [])
   const gpu = system?.gpu
   const gpuPercent = gpu ? Math.min(100, Math.round(gpu.memoryUsedMb / gpu.memoryTotalMb * 100)) : 31
+  const h3Ready = !!probeResult && (h3Patch?.requiredNodes || []).every(node=>probeResult.h3RelatedNodes.includes(node))
 
   const testComfy = async () => {
     setProbing(true); setProbeError(''); setProbeResult(null)
@@ -254,7 +258,8 @@ function App() {
           <label htmlFor="comfy-url">ComfyUI 地址</label>
           <div className="url-row"><input id="comfy-url" value={comfyUrl} onChange={e=>setComfyUrl(e.target.value)} /><button onClick={testComfy} disabled={probing}>{probing?'正在检测…':'测试连接'}</button></div>
           {probeError && <div className="probe-message error"><Info/><span><strong>连接未通过</strong><small>{probeError}</small></span></div>}
-          {probeResult && <div className="probe-message success"><ShieldCheck/><span><strong>{probeResult.message}</strong><small>发现 {probeResult.nodeCount} 个节点 · H3 相关 {probeResult.h3RelatedNodes.length} 个 · {probeResult.latencyMs} ms</small></span></div>}
+          {probeResult && <div className={`probe-message ${h3Ready?'success':'error'}`}><ShieldCheck/><span><strong>{h3Ready?'H3 运行节点完整':'ComfyUI 可连接，但尚不能运行 H3'}</strong><small>{h3Ready?`已验证 ${h3Patch?.requiredNodes.length||0} 个必需节点 · ${probeResult.latencyMs} ms`:`缺少 H3 必需节点；基础 Runtime v0.30.0 需要应用上游 PR #${h3Patch?.pullRequest||15224} 预览补丁`}</small></span></div>}
+          {h3Patch && <div className="patch-notice"><Info/><span><strong>H3 当前依赖上游预览实现</strong><small>固定提交 {h3Patch.commit.slice(0,8)} · 下载后校验 SHA-256 · 正在开发可回滚安装</small></span></div>}
           <div className="modal-note"><ShieldCheck/><span><strong>本地连接保护</strong><small>MVP 仅探测 127.0.0.1、localhost 或 ::1，避免意外访问不可信远端服务。</small></span></div>
         </section>
       </div>}

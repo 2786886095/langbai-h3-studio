@@ -31,6 +31,8 @@ const RUNTIME_NVIDIA_MANIFEST: &str =
     include_str!("../resources/runtime/manifests/comfyui-v0.30.0-nvidia.json");
 const RUNTIME_CU126_MANIFEST: &str =
     include_str!("../resources/runtime/manifests/comfyui-v0.30.0-nvidia-cu126.json");
+const H3_PREVIEW_PATCH_MANIFEST: &str =
+    include_str!("../resources/runtime/manifests/comfyui-h3-preview-patch.json");
 
 fn builtin_runtime_manifest(variant: &str) -> Result<runtime_installer::RuntimeManifest, String> {
     let source = match variant {
@@ -117,6 +119,12 @@ fn runtime_manifests() -> Result<Vec<runtime_installer::RuntimeManifest>, String
         builtin_runtime_manifest("nvidia")?,
         builtin_runtime_manifest("nvidia-cu126")?,
     ])
+}
+
+#[tauri::command]
+fn h3_preview_patch_manifest() -> Result<serde_json::Value, String> {
+    serde_json::from_str(H3_PREVIEW_PATCH_MANIFEST)
+        .map_err(|e| format!("内置 H3 补丁清单损坏：{e}"))
 }
 
 #[tauri::command]
@@ -830,6 +838,7 @@ pub fn run() {
             download_h3_bundle,
             runtime_get_current,
             runtime_manifests,
+            h3_preview_patch_manifest,
             runtime_download_install_activate,
             runtime_prepare_staging,
             runtime_activate_staged,
