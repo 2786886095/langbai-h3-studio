@@ -38,6 +38,7 @@ type CloudPoll = {status:'queued'|'running'|'completed'|'failed';taskId:string;p
 type ManagedNodeItem = {id:string;name:string;repository:string;commit:string;license:string;category:string;evidenceLevel:string;evidenceUrl:string;requiredNodes:string[];experimental:boolean;installable:boolean;description:string}
 type ManagedNodeState = {id:string;installed:boolean;installedCommit?:string;restartRequired:boolean;verified:boolean;category:string;evidenceLevel:string}
 type SshTunnelStatus = {running:boolean;pid?:number;endpoint?:string;localPort?:number;startedAt?:number;exitCode?:number;phase:'starting'|'ready'|'stopped'|'failed';errorCode?:string;error?:string}
+type AutoDlProbe = {os:string;gpus:Array<{name:string;vramMib?:number;driverVersion?:string}>;totalVramMib:number;ramTotalMib?:number;python?:string;disks:Array<{availableBytes?:number;mountPoint:string}>;comfyuiCandidates:Array<{path:string;h3SourceFiles:Array<{relativePath:string;present:boolean}>;modelVariants:Array<{id:string;files:Array<{relativePath:string;expectedSizeBytes:number;present:boolean;sizeBytes:number}>}>;kjH3SageAttentionPresent:boolean}>}
 
 const modeContent = {
   text: { title: '文字生成视频', desc: '只需描述画面、镜头和声音，适合从零开始创作。' },
@@ -122,6 +123,9 @@ function App() {
   const [cloudResolution, setCloudResolution] = useState<'768P'|'1080P'>('768P')
   const [cloudTask, setCloudTask] = useState<CloudPoll|null>(null)
   const [localResolution, setLocalResolution] = useState<'608x352'|'736x416'|'1344x768'>('1344x768')
+  const [seed, setSeed] = useState(()=>Math.floor(Math.random()*Number.MAX_SAFE_INTEGER))
+  const [seedLocked, setSeedLocked] = useState(false)
+  const [referenceImageSize, setReferenceImageSize] = useState<'match'|'max'>('match')
   const [managedNodeCatalog, setManagedNodeCatalog] = useState<ManagedNodeItem[]>([])
   const [managedNodeStates, setManagedNodeStates] = useState<ManagedNodeState[]>([])
   const [managedNodeBusy, setManagedNodeBusy] = useState('')
@@ -137,6 +141,8 @@ function App() {
   const [sshMessage, setSshMessage] = useState('')
   const [sshBusy, setSshBusy] = useState(false)
   const [autodlSshCommand, setAutodlSshCommand] = useState('')
+  const [autoDlProbe, setAutoDlProbe] = useState<AutoDlProbe|null>(null)
+  const [autoDlProbeBusy, setAutoDlProbeBusy] = useState(false)
   useEffect(() => {
     invoke<SystemProbe>('probe_system').then(value=>{setSystem(value);if(value.gpu&&value.gpu.memoryTotalMb<10000){setMemoryProfile('eight_gb');setLocalResolution('608x352')}else if(value.gpu&&value.gpu.memoryTotalMb<16000)setMemoryProfile('conservative')}).catch(() => {})
     invoke<RuntimeManifest[]>('runtime_manifests').then(setRuntimeManifests).catch(()=>{})
@@ -173,14 +179,14 @@ function App() {
             saved.push(await invoke<string>('comfy_save_output',{baseUrl:comfyUrl,asset,outputDirectory:outputPath}))
           }
           const sample=benchmarkRef.current
-          if(sample)await invoke('benchmark_save',{report:{schemaVersion:1,reportId:value.promptId,createdAt:Math.floor(Date.now()/1000),studioVersion:'0.8.1',gpuName:sample.gpuName||'未检测到',driverVersion:sample.driverVersion,vramTotalMb:sample.vramTotal,peakVramUsedMb:sample.peakVram,ramTotalMb:sample.ramTotal,peakRamUsedMb:sample.peakRam,runtimeVersion:comfyUrl,h3PatchCommit:h3Patch?.commit||'',generationMode:sample.mode,width:sample.width,height:sample.height,durationSeconds:sample.duration,steps:sample.steps,modelFile:sample.modelFile,enabledPlugins:Object.entries(pluginLock.plugins).filter(([,item])=>item.enabled).map(([id])=>id),elapsedSeconds:(Date.now()-sample.startedAt)/1000,outcome:'completed',errorSummary:'',outputFile:saved[0]||''}}).catch(()=>{})
+          if(sample)await invoke('benchmark_save',{report:{schemaVersion:1,reportId:value.promptId,createdAt:Math.floor(Date.now()/1000),studioVersion:'0.9.0',gpuName:sample.gpuName||'未检测到',driverVersion:sample.driverVersion,vramTotalMb:sample.vramTotal,peakVramUsedMb:sample.peakVram,ramTotalMb:sample.ramTotal,peakRamUsedMb:sample.peakRam,runtimeVersion:comfyUrl,h3PatchCommit:h3Patch?.commit||'',generationMode:sample.mode,width:sample.width,height:sample.height,durationSeconds:sample.duration,steps:sample.steps,modelFile:sample.modelFile,enabledPlugins:Object.entries(pluginLock.plugins).filter(([,item])=>item.enabled).map(([id])=>id),elapsedSeconds:(Date.now()-sample.startedAt)/1000,outcome:'completed',errorSummary:'',outputFile:saved[0]||''}}).catch(()=>{})
           benchmarkRef.current=null
           if(activeJobId)await invoke('update_job',{patch:{id:activeJobId,status:'completed',stage:'已完成',progress:1,planJson:null,outputPath:saved[0]||null,errorSummary:null}}).catch(()=>{})
           setJobMessage(saved.length?`生成完成，已保存到 ${saved.join('、')}`:'生成完成，但历史记录中没有视频输出')
           setActivePromptId('');setActiveJobId('');setGenerating(false)
         }else if(value.status==='failed'){
           const sample=benchmarkRef.current
-          if(sample)await invoke('benchmark_save',{report:{schemaVersion:1,reportId:value.promptId,createdAt:Math.floor(Date.now()/1000),studioVersion:'0.8.1',gpuName:sample.gpuName||'未检测到',driverVersion:sample.driverVersion,vramTotalMb:sample.vramTotal,peakVramUsedMb:sample.peakVram,ramTotalMb:sample.ramTotal,peakRamUsedMb:sample.peakRam,runtimeVersion:comfyUrl,h3PatchCommit:h3Patch?.commit||'',generationMode:sample.mode,width:sample.width,height:sample.height,durationSeconds:sample.duration,steps:sample.steps,modelFile:sample.modelFile,enabledPlugins:Object.entries(pluginLock.plugins).filter(([,item])=>item.enabled).map(([id])=>id),elapsedSeconds:(Date.now()-sample.startedAt)/1000,outcome:'failed',errorSummary:value.error||'ComfyUI 执行失败',outputFile:''}}).catch(()=>{})
+          if(sample)await invoke('benchmark_save',{report:{schemaVersion:1,reportId:value.promptId,createdAt:Math.floor(Date.now()/1000),studioVersion:'0.9.0',gpuName:sample.gpuName||'未检测到',driverVersion:sample.driverVersion,vramTotalMb:sample.vramTotal,peakVramUsedMb:sample.peakVram,ramTotalMb:sample.ramTotal,peakRamUsedMb:sample.peakRam,runtimeVersion:comfyUrl,h3PatchCommit:h3Patch?.commit||'',generationMode:sample.mode,width:sample.width,height:sample.height,durationSeconds:sample.duration,steps:sample.steps,modelFile:sample.modelFile,enabledPlugins:Object.entries(pluginLock.plugins).filter(([,item])=>item.enabled).map(([id])=>id),elapsedSeconds:(Date.now()-sample.startedAt)/1000,outcome:'failed',errorSummary:value.error||'ComfyUI 执行失败',outputFile:''}}).catch(()=>{})
           if(activeJobId)await invoke('update_job',{patch:{id:activeJobId,status:'failed',stage:'生成失败',progress:1,planJson:null,outputPath:null,errorSummary:value.error||'ComfyUI 执行失败'}}).catch(()=>{})
           benchmarkRef.current=null;setActivePromptId('');setActiveJobId('');setGenerating(false)
         }
@@ -262,7 +268,9 @@ function App() {
     const workflowMode=mode==='text'?'t2v':mode==='frames'?'fl2va':'ref2va'
     if(acceleration==='kj_h3_sage_attention'&&!kjSageReady){setJobMessage('请先安装 KJNodes、重启托管 Runtime 并重新检测 H3 SageAttention 节点');setGenerating(false);return}
     const [localWidth,localHeight]=localResolution.split('x').map(Number)
-    const request = { mode:workflowMode, prompt, width:localWidth, height:localHeight, durationSeconds:duration, seed:Date.now(), steps, referenceImageSize:'match', acceleration, outputDirectory:outputPath, baseUrl:comfyUrl, assets:assets.map(({path,mime,kind,role})=>({path,mime,kind,role})) }
+    const actualSeed=seedLocked?seed:Math.floor(Math.random()*Number.MAX_SAFE_INTEGER)
+    setSeed(actualSeed)
+    const request = { mode:workflowMode, prompt, width:localWidth, height:localHeight, durationSeconds:duration, seed:actualSeed, steps, referenceImageSize, acceleration, outputDirectory:outputPath, baseUrl:comfyUrl, assets:assets.map(({path,mime,kind,role})=>({path,mime,kind,role})) }
     try {
       setJobMessage(assets.length?'正在上传素材并编译工作流…':'正在编译并提交工作流…')
       const started=await invoke<StartedGeneration>('start_h3_generation',{input:request})
@@ -303,6 +311,8 @@ function App() {
           if(['608x352','736x416','1344x768'].includes(resolution))setLocalResolution(resolution as '608x352'|'736x416'|'1344x768')
         }
         if(value.acceleration==='native'||value.acceleration==='kj_h3_sage_attention')setAcceleration(value.acceleration)
+        if(typeof value.seed==='number'){setSeed(value.seed);setSeedLocked(true)}
+        if(value.referenceImageSize==='match'||value.referenceImageSize==='max')setReferenceImageSize(value.referenceImageSize)
       }
       const stored=Array.isArray(value.assets)?value.assets as Array<{path:string;role:LocalAsset['role']}>:[]
       if(stored.length){const inspected=await invoke<Array<Omit<LocalAsset,'role'|'status'>>>('inspect_input_files',{paths:stored.map(item=>item.path)});setAssets(inspected.map((item,index)=>({...item,role:stored[index].role,status:'selected'})))}else setAssets([])
@@ -367,6 +377,12 @@ function App() {
     setSshBusy(true);setSshMessage('正在建立加密隧道并等待远端 ComfyUI…')
     try{const value=await invoke<SshTunnelStatus>('ssh_tunnel_start',{config:{host:sshHost,user:sshUser,port:sshPort,identityFile:sshIdentity,knownHostsFile:sshKnownHosts,remoteComfyPort:sshRemotePort}});setSshStatus(value);if(value.endpoint){setComfyUrl(value.endpoint);setSshMessage(`远程 RTX 工作站已通过本地加密隧道连接 · ${value.endpoint}`);setProbeResult(null)}}
     catch(error){setSshMessage(String(error))}finally{setSshBusy(false)}
+  }
+
+  const probeAutoDl = async () => {
+    setAutoDlProbeBusy(true);setAutoDlProbe(null);setSshMessage('正在只读检查 AutoDL 显卡、内存、ComfyUI、H3 节点和模型…')
+    try{const value=await invoke<AutoDlProbe>('autodl_remote_probe',{config:{host:sshHost,user:sshUser,port:sshPort,identityFile:sshIdentity,knownHostsFile:sshKnownHosts,remoteComfyPort:sshRemotePort}});setAutoDlProbe(value);setSshMessage(value.comfyuiCandidates.length?'远端环境检查完成':'已连接远端，但未找到常见路径下的 ComfyUI')}
+    catch(error){setSshMessage(String(error))}finally{setAutoDlProbeBusy(false)}
   }
 
   const stopSshTunnel = async () => {
@@ -498,11 +514,13 @@ function App() {
               </div>
 
               <div className="setting-grid">
-                <div className="field"><label>画面比例</label><button className="select"><span><span className="ratio-icon wide"/>16:9 · 横屏</span><ChevronDown/></button></div>
+                <div className="field"><label>画面比例</label><div className="select static-select"><span><span className="ratio-icon wide"/>16:9 · 横屏</span></div></div>
                 <div className="field"><label>视频时长</label><div className={`segmented ${engine==='cloud'?'two-options':''}`}>{(engine==='cloud'?(cloudResolution==='1080P'?[6]:[6,10]):[5,8,10,15]).map(n=><button key={n} onClick={()=>setDuration(n)} className={duration===n?'active':''}>{n} 秒</button>)}</div></div>
                 <div className="field"><label>生成质量</label>{engine==='cloud'?<div className="segmented two-options">{(['768P','1080P'] as const).map(value=><button key={value} onClick={()=>{setCloudResolution(value);if(value==='1080P')setDuration(6)}} className={cloudResolution===value?'active':''}>{value}</button>)}</div>:<div className="segmented resolution-options">{(['608x352','736x416','1344x768'] as const).map(value=><button key={value} onClick={()=>setLocalResolution(value)} className={localResolution===value?'active':''}>{value}</button>)}</div>}</div>
-                <div className="field"><label>随机种子 <Info/></label><button className="select"><span>自动随机</span><RotateCcw/></button></div>
+                <div className="field"><label>随机种子 <Info/></label>{engine==='cloud'?<div className="select static-select"><span>由云端服务管理</span></div>:<div className="seed-control"><input type="number" min="0" max={Number.MAX_SAFE_INTEGER} value={seed} disabled={!seedLocked} onChange={e=>setSeed(Math.max(0,Math.min(Number.MAX_SAFE_INTEGER,Number(e.target.value)||0)))}/><button onClick={()=>setSeedLocked(!seedLocked)}>{seedLocked?'锁定':'自动'}</button><button aria-label="生成新随机种子" onClick={()=>setSeed(Math.floor(Math.random()*Number.MAX_SAFE_INTEGER))}><RotateCcw/></button></div>}</div>
               </div>
+
+              {engine==='local'&&mode==='reference'&&<div className="reference-size-setting"><div><strong>参考图处理方式</strong><small>匹配输出更省显存；最高保真会将参考图短边按 H3 上限处理，参考 token 会贯穿每个采样步。</small></div><div className="segmented two-options"><button className={referenceImageSize==='match'?'active':''} onClick={()=>setReferenceImageSize('match')}>匹配输出</button><button className={referenceImageSize==='max'?'active':''} onClick={()=>setReferenceImageSize('max')}>最高保真</button></div></div>}
 
               {engine==='local'&&<><button className="advanced-toggle" onClick={()=>setAdvanced(!advanced)}><span><Settings/> 高级设置 <small>采样、卸载与加速选项</small></span><ChevronDown className={advanced?'rotated':''}/></button>
               {advanced && <div className="advanced-panel"><div><label>采样步数 <b>{steps}</b></label><input type="range" min="12" max="50" value={steps} onChange={event=>setSteps(Number(event.target.value))}/></div><div><label>显存策略</label><button className="select" onClick={()=>setEngineDialog(true)}><span>{memoryProfile==='auto'?'自动动态显存':memoryProfile==='conservative'?'保守低显存':memoryProfile==='eight_gb'?'8GB 极低显存实验':'最小显存'}</span><ChevronDown/></button></div><div><label>加速方案</label><button className="select" onClick={openPlugins}><span><Zap/> {acceleration==='kj_h3_sage_attention'?'KJNodes H3 SageAttention（实验）':'官方 INT8 + NVFP4 原生方案'}</span><ChevronDown/></button></div></div>}</>}
@@ -554,6 +572,8 @@ function App() {
           <div className="ssh-grid"><label>SSH 主机<input value={sshHost} onChange={e=>setSshHost(e.target.value)} placeholder="GPU_SERVER_IP"/></label><label>用户名<input value={sshUser} onChange={e=>setSshUser(e.target.value)} /></label><label>SSH 端口<input type="number" min="1" max="65535" value={sshPort} onChange={e=>setSshPort(Number(e.target.value))}/></label><label>远端 ComfyUI 端口<input type="number" min="1" max="65535" value={sshRemotePort} onChange={e=>setSshRemotePort(Number(e.target.value))}/></label></div>
           <label>SSH 私钥</label><div className="url-row"><input value={sshIdentity} readOnly placeholder="选择专用 SSH 私钥"/><button onClick={()=>chooseSshFile('identity')}>选择</button></div>
           <label>known_hosts</label><div className="url-row"><input value={sshKnownHosts} readOnly placeholder="选择已从租用商核验指纹的 known_hosts"/><button onClick={()=>chooseSshFile('knownHosts')}>选择</button></div>
+          <button className="primary wide remote-probe-button" onClick={probeAutoDl} disabled={autoDlProbeBusy||!sshHost||!sshIdentity||!sshKnownHosts}>{autoDlProbeBusy?'正在检查远端环境…':'检查 AutoDL H3 环境'}</button>
+          {autoDlProbe&&<div className="remote-probe-result"><div className="remote-summary"><strong>{autoDlProbe.gpus.map(gpu=>gpu.name).join('、')||'未检测到 NVIDIA GPU'}</strong><small>{autoDlProbe.os} · 显存 {(autoDlProbe.totalVramMib/1024).toFixed(1)}GB · 内存 {autoDlProbe.ramTotalMib?(autoDlProbe.ramTotalMib/1024).toFixed(0)+'GB':'未知'} · {autoDlProbe.python||'未找到 Python'}</small></div>{autoDlProbe.comfyuiCandidates.length===0?<div className="empty-result">常见路径下未发现 ComfyUI</div>:autoDlProbe.comfyuiCandidates.map(candidate=>{const sourcesReady=candidate.h3SourceFiles.every(file=>file.present);return <article key={candidate.path}><div><strong>{candidate.path}</strong><small>{sourcesReady?'H3 源码完整':'H3 源码不完整'} · {candidate.kjH3SageAttentionPresent?'KJ H3 Sage 已安装':'未检测到 KJ H3 Sage'}</small></div>{candidate.modelVariants.map(variant=>{const ready=variant.files.every(file=>file.present&&file.sizeBytes===file.expectedSizeBytes);return <span key={variant.id} className={ready?'ready':'missing'}>{variant.id.toUpperCase()} {ready?'模型完整':'模型缺失或大小不符'}</span>})}</article>})}</div>}
           <div className="runtime-actions"><button onClick={startSshTunnel} disabled={sshBusy||sshStatus?.running||!sshHost||!sshIdentity||!sshKnownHosts}>{sshBusy?'连接中…':'连接远程 GPU'}</button><button onClick={stopSshTunnel} disabled={!sshStatus?.running}>断开隧道</button></div>
           {sshMessage&&<div className={`probe-message ${sshStatus?.running||sshMessage.includes('已断开')?'success':'error'}`}><ShieldCheck/><span><strong>{sshMessage}</strong><small>{sshStatus?.running?`SSH PID ${sshStatus.pid} · 远端算力，本机保存结果`:'严格校验主机密钥；不会自动信任未知服务器'}</small></span></div>}
           <div className="modal-note warning"><Info/><span><strong>远端安全前置条件</strong><small>远端 ComfyUI 只监听 127.0.0.1，云服务器防火墙只开放 SSH；首次连接前请从租用商控制台核对主机指纹并准备 known_hosts。</small></span></div>
@@ -625,9 +645,9 @@ function App() {
             <article><strong>视频描述</strong><p>按“主体 → 动作 → 场景 → 镜头 → 光线 → 声音”书写。H3 会同时生成画面与立体声音，可直接描述对白、环境音和音乐节奏。</p></article>
             <article><strong>生成模式</strong><p>文字模式不需要素材；首尾帧模式用 1–2 张图片约束开始和结束；全模态参考可组合图片、视频和音频。</p></article>
             <article><strong>时长</strong><p>固定按 24 FPS 生成，帧数自动对齐 H3 的 17k+5 网格。例如 5 秒会生成 124 帧。更长视频通常更慢、占用更多显存。</p></article>
-            <article><strong>分辨率</strong><p>当前正式映射为 1344×768，宽高必须是 32 的倍数。界面不会将预览缩放尺寸误当成模型输出尺寸。</p></article>
+            <article><strong>分辨率</strong><p>608×352 用于极低显存试跑，736×416 用于平衡测试，1344×768 为标准 768p 档。三档都会真实写入 H3 工作流。</p></article>
             <article><strong>采样步数</strong><p>默认 20 步。增加步数不一定持续提高质量，但会近似线性增加生成时间；新手建议保持默认值。</p></article>
-            <article><strong>随机种子</strong><p>相同模型、素材、参数和种子有助于复现结果。当前自动生成种子，任务记录会保存实际值。</p></article>
+            <article><strong>随机种子</strong><p>“自动”会在每次提交时生成新种子；切换为“锁定”可复现相同模型、素材和参数组合。任务记录保存实际值。</p></article>
             <article><strong>参考素材标签</strong><p>Ref2VA 会按顺序对应 &lt;Picture 1&gt;、&lt;Video 1&gt;、&lt;Audio 1&gt;。需要精确控制时，可在描述中引用这些标签。</p></article>
             <article><strong>显存与加速</strong><p>24GB 显存和 64GB 内存是建议值，不是兼容保证。加速插件只有通过当前 Runtime 节点与冲突检查后才会标记可用。</p></article>
           </div>
