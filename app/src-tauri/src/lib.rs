@@ -1387,6 +1387,24 @@ fn validate_output_path(path: String) -> Result<String, String> {
     Ok(canonical.to_string_lossy().to_string())
 }
 
+#[tauri::command]
+fn default_output_path() -> Result<String, String> {
+    let executable = std::env::current_exe().map_err(|e| {
+        format!(
+            "\u{8bfb}\u{53d6}\u{8f6f}\u{4ef6}\u{6839}\u{76ee}\u{5f55}\u{5931}\u{8d25}\u{ff1a}{e}"
+        )
+    })?;
+    let output = output_path_for_executable(&executable)?;
+    validate_output_path(output.to_string_lossy().to_string())
+}
+
+fn output_path_for_executable(executable: &std::path::Path) -> Result<PathBuf, String> {
+    executable
+        .parent()
+        .map(|root| root.join("output"))
+        .ok_or_else(|| "\u{8f6f}\u{4ef6}\u{6839}\u{76ee}\u{5f55}\u{65e0}\u{6548}".into())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1397,6 +1415,7 @@ pub fn run() {
             benchmark_list,
             probe_comfyui,
             validate_output_path,
+            default_output_path,
             compile_workflow,
             download_model_file,
             model_store::scan_local_models,
@@ -1487,5 +1506,12 @@ mod tests {
     fn normalizes_local_comfyui_endpoint() {
         let url = normalize_loopback_url("http://127.0.0.1:8188/").unwrap();
         assert_eq!(url.as_str(), "http://127.0.0.1:8188/object_info");
+    }
+
+    #[test]
+    fn default_output_is_beside_the_executable() {
+        let path = output_path_for_executable(std::path::Path::new(r"C:\Apps\Langbai\studio.exe"))
+            .unwrap();
+        assert_eq!(path, std::path::PathBuf::from(r"C:\Apps\Langbai\output"));
     }
 }

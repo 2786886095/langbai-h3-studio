@@ -83,7 +83,8 @@ function App() {
   const [jobs, setJobs] = useState<JobRecord[]>([])
   const [historyLoading, setHistoryLoading] = useState(false)
   const [settingsDialog, setSettingsDialog] = useState(false)
-  const [outputPath, setOutputPath] = useState(()=>readPreference('langbai-h3-output-path','D:\\H3作品'))
+  const [outputPath, setOutputPath] = useState(()=>readPreference('langbai-h3-output-path',''))
+  const [outputMode, setOutputMode] = useState<'default'|'ask'>(()=>readPreference('langbai-h3-output-mode','default')==='ask'?'ask':'default')
   const [pathMessage, setPathMessage] = useState('')
   const [runtimeManifests, setRuntimeManifests] = useState<RuntimeManifest[]>([])
   const [runtimeProgress, setRuntimeProgress] = useState<TransferProgress | null>(null)
@@ -178,6 +179,8 @@ function App() {
   }, [])
   useEffect(()=>{try{localStorage.setItem('langbai-h3-draft',JSON.stringify({prompt,duration,steps,mode}))}catch{}},[prompt,duration,steps,mode])
   useEffect(()=>{try{localStorage.setItem('langbai-h3-output-path',outputPath)}catch{}},[outputPath])
+  useEffect(()=>{try{localStorage.setItem('langbai-h3-output-mode',outputMode)}catch{}},[outputMode])
+  useEffect(()=>{if(outputPath)return;invoke<string>('default_output_path').then(setOutputPath).catch(error=>setPathMessage(String(error)))},[outputPath])
   useEffect(()=>{
     if(!activePromptId) return
     let stopped=false
@@ -271,7 +274,15 @@ function App() {
   }
 
   const createGenerationJob = async () => {
-    setGenerating(true); setJobMessage('')
+    setJobMessage('')
+    let resolvedOutputPath=outputPath
+    if(outputMode==='ask'){
+      const selected=await open({directory:true,multiple:false,title:'选择本次视频保存目录'})
+      if(typeof selected!=='string'){setJobMessage('已取消本次生成');return}
+      resolvedOutputPath=selected
+    }
+    try{resolvedOutputPath=await invoke<string>('validate_output_path',{path:resolvedOutputPath});setOutputPath(resolvedOutputPath)}catch(error){setJobMessage(String(error));return}
+    setGenerating(true)
     if(!prompt.trim()){setJobMessage('请先填写视频描述');setGenerating(false);return}
     if(mode==='frames'&&assets.length===0){setJobMessage('首尾帧模式至少需要选择一张图片');setGenerating(false);return}
     if(mode==='reference'&&assets.length===0){setJobMessage('全模态参考模式至少需要选择一个素材');setGenerating(false);return}
@@ -279,14 +290,14 @@ function App() {
       if(!apiKeyStatus.configured){setJobMessage('请先在运行引擎中设置 MiniMax API Key');setGenerating(false);setEngineDialog(true);return}
       if(mode==='frames'&&(assets.length<1||assets.some(item=>item.kind!=='image'))){setJobMessage('云端首帧/首尾帧模式需要 1–2 张图片');setGenerating(false);return}
       if(cloudResolution==='1080P'&&duration!==6){setJobMessage('Hailuo-2.3 的 1080P 当前仅支持 6 秒');setGenerating(false);return}
-      try{setJobMessage('正在安全提交 MiniMax 云端任务…');const cloudRequest={prompt,mode:mode==='text'?'text':assets.length>1?'first_last_frames':'first_frame',model:mode==='frames'&&assets.length>1?'Hailuo-02':'Hailuo-2.3',resolution:cloudResolution,durationSeconds:duration,outputDirectory:outputPath,assets:assets.map(({path,role})=>({path,role}))};const started=await invoke<CloudStart>('minimax_cloud_start',{input:cloudRequest});const job=await invoke<{id:string}>('create_job',{input:{name:`MiniMax 云端 · ${new Date().toLocaleTimeString()}`,requestJson:JSON.stringify({...cloudRequest,engine:'cloud',taskId:started.taskId}),backendId:started.taskId}});setActiveJobId(job.id);setCloudTask({taskId:started.taskId,status:'queued',progress:0});setJobMessage(`云端任务 ${job.id} 已提交`)}catch(error){setJobMessage(String(error));setGenerating(false)}return
+      try{setJobMessage('正在安全提交 MiniMax 云端任务…');const cloudRequest={prompt,mode:mode==='text'?'text':assets.length>1?'first_last_frames':'first_frame',model:mode==='frames'&&assets.length>1?'Hailuo-02':'Hailuo-2.3',resolution:cloudResolution,durationSeconds:duration,outputDirectory:resolvedOutputPath,assets:assets.map(({path,role})=>({path,role}))};const started=await invoke<CloudStart>('minimax_cloud_start',{input:cloudRequest});const job=await invoke<{id:string}>('create_job',{input:{name:`MiniMax 云端 · ${new Date().toLocaleTimeString()}`,requestJson:JSON.stringify({...cloudRequest,engine:'cloud',taskId:started.taskId}),backendId:started.taskId}});setActiveJobId(job.id);setCloudTask({taskId:started.taskId,status:'queued',progress:0});setJobMessage(`云端任务 ${job.id} 已提交`)}catch(error){setJobMessage(String(error));setGenerating(false)}return
     }
     const workflowMode=mode==='text'?'t2v':mode==='frames'?'fl2va':'ref2va'
     if(acceleration==='kj_h3_sage_attention'&&!kjSageReady){setJobMessage('请先安装 KJNodes、重启托管 Runtime 并重新检测 H3 SageAttention 节点');setGenerating(false);return}
     const [localWidth,localHeight]=localResolution.split('x').map(Number)
     const actualSeed=seedLocked?seed:Math.floor(Math.random()*Number.MAX_SAFE_INTEGER)
     setSeed(actualSeed)
-    const request = { mode:workflowMode, prompt, width:localWidth, height:localHeight, durationSeconds:duration, seed:actualSeed, steps, referenceImageSize, acceleration, outputDirectory:outputPath, baseUrl:comfyUrl, assets:assets.map(({path,mime,kind,role})=>({path,mime,kind,role})) }
+    const request = { mode:workflowMode, prompt, width:localWidth, height:localHeight, durationSeconds:duration, seed:actualSeed, steps, referenceImageSize, acceleration, outputDirectory:resolvedOutputPath, baseUrl:comfyUrl, assets:assets.map(({path,mime,kind,role})=>({path,mime,kind,role})) }
     try {
       setJobMessage(assets.length?'正在上传素材并编译工作流…':'正在编译并提交工作流…')
       const started=await invoke<StartedGeneration>('start_h3_generation',{input:request})
@@ -729,6 +740,7 @@ function App() {
         <section className="modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
           <div className="modal-head"><div><span className="eyebrow"><FolderOpen/> 输出设置</span><h2 id="settings-title">视频保存路径</h2></div><button className="icon-button" onClick={()=>setSettingsDialog(false)} aria-label="关闭对话框"><X/></button></div>
           <p>生成前会检查目录是否存在和可写。验证过程只创建并立即删除一个测试文件。</p>
+          <div className="output-mode-picker" role="radiogroup" aria-label="视频保存方式"><button className={outputMode==='default'?'selected':''} onClick={()=>setOutputMode('default')} role="radio" aria-checked={outputMode==='default'}><strong>保存到默认目录</strong><small>首次使用为软件根目录的 output</small></button><button className={outputMode==='ask'?'selected':''} onClick={()=>setOutputMode('ask')} role="radio" aria-checked={outputMode==='ask'}><strong>每次询问</strong><small>点击生成后再选择本次保存位置</small></button></div>
           <label htmlFor="output-path">默认保存目录</label>
           <div className="url-row"><input id="output-path" value={outputPath} onChange={e=>{setOutputPath(e.target.value);setPathMessage('')}} /><button onClick={chooseOutputPath}>选择目录</button><button onClick={validatePath}>验证</button></div>
           {pathMessage && <div className={`probe-message ${pathMessage.includes('可写')?'success':'error'}`}><ShieldCheck/><span><strong>{pathMessage}</strong><small>后续任务可单独覆盖此目录。</small></span></div>}
