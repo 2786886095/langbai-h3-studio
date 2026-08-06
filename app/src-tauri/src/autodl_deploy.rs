@@ -23,6 +23,8 @@ pub const TARGET_ROOT: &str = "/workspace/LangbaiH3Studio";
 pub const REMOTE_COMMAND: &str = "sh -s -- langbai-h3-deploy-v1";
 pub const STATUS_REMOTE_COMMAND: &str = "sh -s -- langbai-h3-status-v1";
 pub const ROLLBACK_REMOTE_COMMAND: &str = "sh -s -- langbai-h3-rollback-v1";
+pub const DOWNLOAD_START_REMOTE_COMMAND: &str = "sh -s -- langbai-h3-download-start-v1";
+pub const DOWNLOAD_CANCEL_REMOTE_COMMAND: &str = "sh -s -- langbai-h3-download-cancel-v1";
 const MAX_PROTOCOL_BYTES: usize = 256 * 1024;
 pub const MODEL_WORKER: &str = include_str!("../resources/autodl/model_worker.py");
 
@@ -68,6 +70,47 @@ emit "$((last+1))" rolling_back '正在回滚 Studio 隔离准备目录'
 rm -f "$DIR/manifest.json" "$DIR/journal.tsv"
 rmdir "$DIR/logs" "$DIR"
 emit "$((last+2))" completed '隔离准备目录已精确回滚'
+"#;
+
+pub const DOWNLOAD_START_SCRIPT: &str = r#"set -eu
+umask 077
+ROOT=/workspace/LangbaiH3Studio
+case "${DEPLOYMENT_ID:-}" in (h3-[a-f0-9]*) ;; (*) exit 64;; esac
+case "${WORKER_B64:-}" in (*[!A-Za-z0-9+/=]*|'') exit 64;; esac
+case "${WORKER_SHA256:-}" in (*[!a-f0-9]*|'') exit 64;; esac
+DIR="$ROOT/state/deployments/$DEPLOYMENT_ID"
+[ -f "$DIR/manifest.json" ] && [ -f "$DIR/journal.tsv" ] || exit 66
+command -v python3 >/dev/null 2>&1 || exit 69
+mkdir "$DIR/worker.lock" 2>/dev/null || exit 67
+cleanup() { rmdir "$DIR/worker.lock" 2>/dev/null || true; }
+trap cleanup EXIT INT TERM
+tmp="$DIR/model_worker.py.tmp"
+printf '%s' "$WORKER_B64" | base64 -d > "$tmp"
+actual="$(sha256sum "$tmp" | cut -d' ' -f1)"
+[ "$actual" = "$WORKER_SHA256" ] || exit 65
+chmod 700 "$tmp"
+mv "$tmp" "$DIR/model_worker.py"
+rm -f "$DIR/cancel.requested"
+last="$(tail -n 1 "$DIR/journal.tsv" | cut -f2)"
+case "$last" in (''|*[!0-9]*) exit 65;; esac
+nohup sh -c 'python3 "$1" --root /workspace/LangbaiH3Studio --deployment-id "$2" >> "$3" 2>&1; rmdir "$4" 2>/dev/null || true' sh "$DIR/model_worker.py" "$DEPLOYMENT_ID" "$DIR/logs/worker.log" "$DIR/worker.lock" </dev/null >/dev/null 2>&1 &
+pid=$!
+trap - EXIT INT TERM
+encoded="$(printf '{"state":"starting","pid":%s}' "$pid" | base64 | tr -d '\n')"
+printf 'event\t%s\tlocking\t%s\n' "$((last+1))" "$encoded" | tee -a "$DIR/journal.tsv"
+"#;
+
+pub const DOWNLOAD_CANCEL_SCRIPT: &str = r#"set -eu
+umask 077
+ROOT=/workspace/LangbaiH3Studio
+case "${DEPLOYMENT_ID:-}" in (h3-[a-f0-9]*) ;; (*) exit 64;; esac
+DIR="$ROOT/state/deployments/$DEPLOYMENT_ID"
+[ -f "$DIR/manifest.json" ] && [ -f "$DIR/journal.tsv" ] || exit 66
+: > "$DIR/cancel.requested"
+last="$(tail -n 1 "$DIR/journal.tsv" | cut -f2)"
+case "$last" in (''|*[!0-9]*) exit 65;; esac
+encoded="$(printf '%s' '{"state":"cancelling"}' | base64 | tr -d '\n')"
+printf 'event\t%s\tcleanup\t%s\n' "$((last+1))" "$encoded" | tee -a "$DIR/journal.tsv"
 "#;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -412,6 +455,48 @@ pub fn build_rollback_launch_plan(
     Ok(launch)
 }
 
+pub fn build_download_start_launch_plan(
+    config: &SshTunnelConfig,
+    program: PathBuf,
+    deployment_id: &str,
+) -> Result<DeployLaunchPlan, String> {
+    let mut launch = build_status_launch_plan(config, program, deployment_id)?;
+    *launch
+        .args
+        .last_mut()
+        .ok_or("SSH \u{547d}\u{4ee4}\u{4e3a}\u{7a7a}")? = DOWNLOAD_START_REMOTE_COMMAND.into();
+    let worker_sha = format!("{:x}", Sha256::digest(MODEL_WORKER.as_bytes()));
+    launch.stdin = format!(
+        "DEPLOYMENT_ID='{}'\nWORKER_SHA256='{}'\nWORKER_B64='{}'\n{}",
+        deployment_id,
+        worker_sha,
+        BASE64.encode(MODEL_WORKER.as_bytes()),
+        DOWNLOAD_START_SCRIPT
+    )
+    .into_bytes();
+    launch.script_sha256 = format!("{:x}", Sha256::digest(DOWNLOAD_START_SCRIPT.as_bytes()));
+    Ok(launch)
+}
+
+pub fn build_download_cancel_launch_plan(
+    config: &SshTunnelConfig,
+    program: PathBuf,
+    deployment_id: &str,
+) -> Result<DeployLaunchPlan, String> {
+    let mut launch = build_status_launch_plan(config, program, deployment_id)?;
+    *launch
+        .args
+        .last_mut()
+        .ok_or("SSH \u{547d}\u{4ee4}\u{4e3a}\u{7a7a}")? = DOWNLOAD_CANCEL_REMOTE_COMMAND.into();
+    launch.stdin = format!(
+        "DEPLOYMENT_ID='{}'\n{}",
+        deployment_id, DOWNLOAD_CANCEL_SCRIPT
+    )
+    .into_bytes();
+    launch.script_sha256 = format!("{:x}", Sha256::digest(DOWNLOAD_CANCEL_SCRIPT.as_bytes()));
+    Ok(launch)
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoDlDeployPrepareResult {
@@ -579,6 +664,34 @@ pub async fn autodl_deploy_rollback(
         })?
 }
 
+#[tauri::command]
+pub async fn autodl_model_download_start(
+    config: SshTunnelConfig,
+    deployment_id: String,
+) -> Result<Vec<AutoDlDeployProgress>, String> {
+    let launch = build_download_start_launch_plan(
+        &config,
+        crate::ssh_tunnel::system_ssh_path()?,
+        &deployment_id,
+    )?;
+    tauri::async_runtime::spawn_blocking(move || run_remote(launch, false)).await
+        .map_err(|_| "AutoDL \u{6a21}\u{578b}\u{4e0b}\u{8f7d}\u{542f}\u{52a8}\u{4efb}\u{52a1}\u{5f02}\u{5e38}".to_string())?
+}
+
+#[tauri::command]
+pub async fn autodl_model_download_cancel(
+    config: SshTunnelConfig,
+    deployment_id: String,
+) -> Result<Vec<AutoDlDeployProgress>, String> {
+    let launch = build_download_cancel_launch_plan(
+        &config,
+        crate::ssh_tunnel::system_ssh_path()?,
+        &deployment_id,
+    )?;
+    tauri::async_runtime::spawn_blocking(move || run_remote(launch, false)).await
+        .map_err(|_| "AutoDL \u{6a21}\u{578b}\u{4e0b}\u{8f7d}\u{53d6}\u{6d88}\u{4efb}\u{52a1}\u{5f02}\u{5e38}".to_string())?
+}
+
 fn stage(value: &str) -> Option<DeployStage> {
     Some(match value {
         "preflight" => DeployStage::Preflight,
@@ -743,5 +856,25 @@ mod tests {
         assert!(MODEL_WORKER.contains("os.replace(part, final)"));
         assert!(MODEL_WORKER.contains("fcntl.LOCK_EX"));
         assert!(!MODEL_WORKER.contains("shell=True"));
+    }
+
+    #[test]
+    fn download_start_and_cancel_use_fixed_commands() {
+        let t = tempdir().unwrap();
+        let c = cfg(t.path());
+        let id = "h3-0123456789abcdefabcd";
+        let start = build_download_start_launch_plan(&c, "ssh.exe".into(), id).unwrap();
+        assert_eq!(start.args.last().unwrap(), DOWNLOAD_START_REMOTE_COMMAND);
+        assert!(!start.args.join(" ").contains(id));
+        let stdin = String::from_utf8(start.stdin).unwrap();
+        assert!(stdin.contains("WORKER_SHA256='"));
+        assert!(stdin.contains("WORKER_B64='"));
+        let cancel = build_download_cancel_launch_plan(&c, "ssh.exe".into(), id).unwrap();
+        assert_eq!(cancel.args.last().unwrap(), DOWNLOAD_CANCEL_REMOTE_COMMAND);
+        assert!(
+            String::from_utf8(cancel.stdin)
+                .unwrap()
+                .contains("cancel.requested")
+        );
     }
 }

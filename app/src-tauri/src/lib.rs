@@ -1438,6 +1438,8 @@ pub fn run() {
             autodl_deploy::autodl_deploy_prepare,
             autodl_deploy::autodl_deploy_status,
             autodl_deploy::autodl_deploy_rollback,
+            autodl_deploy::autodl_model_download_start,
+            autodl_deploy::autodl_model_download_cancel,
             comfy_submit_prompt,
             comfy_get_queue,
             comfy_get_history,
