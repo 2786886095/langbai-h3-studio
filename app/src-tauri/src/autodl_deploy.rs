@@ -24,6 +24,7 @@ pub const REMOTE_COMMAND: &str = "sh -s -- langbai-h3-deploy-v1";
 pub const STATUS_REMOTE_COMMAND: &str = "sh -s -- langbai-h3-status-v1";
 pub const ROLLBACK_REMOTE_COMMAND: &str = "sh -s -- langbai-h3-rollback-v1";
 const MAX_PROTOCOL_BYTES: usize = 256 * 1024;
+pub const MODEL_WORKER: &str = include_str!("../resources/autodl/model_worker.py");
 
 pub const DEPLOY_SCRIPT: &str = r#"set -eu
 umask 077
@@ -435,7 +436,10 @@ fn read_limited(mut reader: impl Read + Send + 'static) -> mpsc::Receiver<Vec<u8
     rx
 }
 
-fn run_prepare(launch: DeployLaunchPlan) -> Result<Vec<AutoDlDeployProgress>, String> {
+fn run_remote(
+    launch: DeployLaunchPlan,
+    require_completed: bool,
+) -> Result<Vec<AutoDlDeployProgress>, String> {
     let mut command = Command::new(&launch.program);
     command
         .args(&launch.args)
@@ -504,10 +508,12 @@ fn run_prepare(launch: DeployLaunchPlan) -> Result<Vec<AutoDlDeployProgress>, St
         });
     }
     let progress = parse_progress(&out)?;
-    if !matches!(
-        progress.last().map(|item| &item.stage),
-        Some(DeployStage::Completed)
-    ) {
+    if require_completed
+        && !matches!(
+            progress.last().map(|item| &item.stage),
+            Some(DeployStage::Completed)
+        )
+    {
         return Err("AutoDL \u{8fdc}\u{7aef}\u{51c6}\u{5907}\u{672a}\u{8fd4}\u{56de}\u{5b8c}\u{6210}\u{4e8b}\u{4ef6}".into());
     }
     Ok(progress)
@@ -527,7 +533,7 @@ pub async fn autodl_deploy_prepare(
         &plan,
     )?;
     let script_sha256 = launch.script_sha256.clone();
-    let progress = tauri::async_runtime::spawn_blocking(move || run_prepare(launch))
+    let progress = tauri::async_runtime::spawn_blocking(move || run_remote(launch, true))
         .await
         .map_err(|_| {
             "AutoDL \u{8fdc}\u{7aef}\u{51c6}\u{5907}\u{4efb}\u{52a1}\u{5f02}\u{5e38}".to_string()
@@ -549,7 +555,7 @@ pub async fn autodl_deploy_status(
         crate::ssh_tunnel::system_ssh_path()?,
         &deployment_id,
     )?;
-    tauri::async_runtime::spawn_blocking(move || run_prepare(launch))
+    tauri::async_runtime::spawn_blocking(move || run_remote(launch, false))
         .await
         .map_err(|_| {
             "AutoDL \u{8fdc}\u{7aef}\u{72b6}\u{6001}\u{4efb}\u{52a1}\u{5f02}\u{5e38}".to_string()
@@ -566,7 +572,7 @@ pub async fn autodl_deploy_rollback(
         crate::ssh_tunnel::system_ssh_path()?,
         &deployment_id,
     )?;
-    tauri::async_runtime::spawn_blocking(move || run_prepare(launch))
+    tauri::async_runtime::spawn_blocking(move || run_remote(launch, true))
         .await
         .map_err(|_| {
             "AutoDL \u{8fdc}\u{7aef}\u{56de}\u{6eda}\u{4efb}\u{52a1}\u{5f02}\u{5e38}".to_string()
@@ -727,5 +733,15 @@ mod tests {
         assert!(script.contains("rm -f \"$DIR/manifest.json\" \"$DIR/journal.tsv\""));
         assert!(!script.contains("rm -rf"));
         assert!(!launch.args.join(" ").contains("h3-0123456789abcdefabcd"));
+    }
+
+    #[test]
+    fn embedded_worker_is_pinned_and_has_required_controls() {
+        assert!(MODEL_WORKER.contains("Range"));
+        assert!(MODEL_WORKER.contains("cancel.requested"));
+        assert!(MODEL_WORKER.contains("sha256_file"));
+        assert!(MODEL_WORKER.contains("os.replace(part, final)"));
+        assert!(MODEL_WORKER.contains("fcntl.LOCK_EX"));
+        assert!(!MODEL_WORKER.contains("shell=True"));
     }
 }
