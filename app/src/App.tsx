@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import { open } from '@tauri-apps/plugin-dialog'
+import { open, save } from '@tauri-apps/plugin-dialog'
 import {
   Aperture, Boxes, ChevronDown, ChevronRight, CircleHelp, Clock3, Cpu,
   Download, FolderOpen, HardDrive, Image, Info, LayoutGrid, Menu,
@@ -30,8 +30,8 @@ type UpdateCandidate = { version:string;fileName:string;downloadUrl:string;sha25
 type DownloadedUpdate = { version:string;installerPath:string;sha256:string }
 type PluginLock = { plugins:Record<string,{version:string;enabled:boolean;sha256:string;provides:string[]}> }
 type PluginInspection = { package:{manifest:{id:string;name:string;version:string;provides:string[];license?:string};packageSha256:string;files:string[]};compatibility:{compatible:boolean;missingNodes:string[];conflicts:string[];provides:string[];reasons:string[]} }
-type BenchmarkState = {startedAt:number;mode:string;width:number;height:number;duration:number;steps:number;modelFile:string;gpuName:string;driverVersion:string;vramTotal:number;peakVram:number;ramTotal:number;peakRam:number}
-type BenchmarkReport = {reportId:string;createdAt:number;gpuName:string;vramTotalMb:number;peakVramUsedMb:number;peakRamUsedMb:number;generationMode:string;width:number;height:number;durationSeconds:number;elapsedSeconds:number;outcome:string;enabledPlugins:string[]}
+type BenchmarkState = {startedAt:number;executionTarget:'local'|'remote_autodl';resourceSamplingSeconds:number;mode:string;width:number;height:number;duration:number;steps:number;modelFile:string;gpuName:string;driverVersion:string;vramTotal:number;peakVram:number;ramTotal:number;peakRam:number}
+type BenchmarkReport = {reportId:string;createdAt:number;executionTarget:string;resourceSamplingSeconds:number;gpuName:string;vramTotalMb:number;peakVramUsedMb:number;peakRamUsedMb:number;generationMode:string;width:number;height:number;durationSeconds:number;elapsedSeconds:number;outcome:string;enabledPlugins:string[]}
 type ManagedRuntimeStatus = {running:boolean;pid?:number;endpoint?:string;startedAt?:number;exitCode?:number}
 type Engine = 'local'|'cloud'
 type ApiKeyStatus = {configured:boolean;maskedHint?:string}
@@ -121,6 +121,7 @@ function App() {
   const [helpDialog, setHelpDialog] = useState(false)
   const benchmarkRef = useRef<BenchmarkState | null>(null)
   const [benchmarkReports, setBenchmarkReports] = useState<BenchmarkReport[]>([])
+  const [benchmarkExportMessage, setBenchmarkExportMessage] = useState('')
   const [memoryProfile, setMemoryProfile] = useState<'auto'|'conservative'|'minimum'|'eight_gb'>('auto')
   const [managedStatus, setManagedStatus] = useState<ManagedRuntimeStatus | null>(null)
   const [managedMessage, setManagedMessage] = useState('')
@@ -188,7 +189,7 @@ function App() {
     let stopped=false
     const poll=async()=>{
       try{
-        const hardware=await invoke<SystemProbe>('probe_system').catch(()=>null)
+        const hardware=benchmarkRef.current?.executionTarget==='remote_autodl'?null:await invoke<SystemProbe>('probe_system').catch(()=>null)
         if(hardware&&benchmarkRef.current){benchmarkRef.current.peakRam=Math.max(benchmarkRef.current.peakRam,hardware.memoryUsedMb);if(hardware.gpu){benchmarkRef.current.peakVram=Math.max(benchmarkRef.current.peakVram,hardware.gpu.memoryUsedMb);benchmarkRef.current.gpuName=hardware.gpu.name;benchmarkRef.current.driverVersion=hardware.gpu.driverVersion;benchmarkRef.current.vramTotal=hardware.gpu.memoryTotalMb}}
         const value=await invoke<GenerationPoll>('comfy_poll_generation',{baseUrl:comfyUrl,promptId:activePromptId})
         if(stopped) return
@@ -200,14 +201,14 @@ function App() {
             saved.push(await invoke<string>('comfy_save_output',{baseUrl:comfyUrl,asset,outputDirectory:outputPath}))
           }
           const sample=benchmarkRef.current
-          if(sample)await invoke('benchmark_save',{report:{schemaVersion:1,reportId:value.promptId,createdAt:Math.floor(Date.now()/1000),studioVersion:'0.10.1',gpuName:sample.gpuName||'未检测到',driverVersion:sample.driverVersion,vramTotalMb:sample.vramTotal,peakVramUsedMb:sample.peakVram,ramTotalMb:sample.ramTotal,peakRamUsedMb:sample.peakRam,runtimeVersion:comfyUrl,h3PatchCommit:h3Patch?.commit||'',generationMode:sample.mode,width:sample.width,height:sample.height,durationSeconds:sample.duration,steps:sample.steps,modelFile:sample.modelFile,enabledPlugins:Object.entries(pluginLock.plugins).filter(([,item])=>item.enabled).map(([id])=>id),elapsedSeconds:(Date.now()-sample.startedAt)/1000,outcome:'completed',errorSummary:'',outputFile:saved[0]||''}}).catch(()=>{})
+          if(sample)await invoke('benchmark_save',{report:{schemaVersion:1,reportId:value.promptId,createdAt:Math.floor(Date.now()/1000),studioVersion:'0.10.2',executionTarget:sample.executionTarget,resourceSamplingSeconds:sample.resourceSamplingSeconds,gpuName:sample.gpuName||'未检测到',driverVersion:sample.driverVersion,vramTotalMb:sample.vramTotal,peakVramUsedMb:sample.peakVram,ramTotalMb:sample.ramTotal,peakRamUsedMb:sample.peakRam,runtimeVersion:comfyUrl,h3PatchCommit:h3Patch?.commit||'',generationMode:sample.mode,width:sample.width,height:sample.height,durationSeconds:sample.duration,steps:sample.steps,modelFile:sample.modelFile,enabledPlugins:Object.entries(pluginLock.plugins).filter(([,item])=>item.enabled).map(([id])=>id),elapsedSeconds:(Date.now()-sample.startedAt)/1000,outcome:'completed',errorSummary:'',outputFile:saved[0]||''}}).catch(()=>{})
           benchmarkRef.current=null
           if(activeJobId)await invoke('update_job',{patch:{id:activeJobId,status:'completed',stage:'已完成',progress:1,planJson:null,outputPath:saved[0]||null,errorSummary:null}}).catch(()=>{})
           setJobMessage(saved.length?`生成完成，已保存到 ${saved.join('、')}`:'生成完成，但历史记录中没有视频输出')
           setActivePromptId('');setActiveJobId('');setGenerating(false)
         }else if(value.status==='failed'){
           const sample=benchmarkRef.current
-          if(sample)await invoke('benchmark_save',{report:{schemaVersion:1,reportId:value.promptId,createdAt:Math.floor(Date.now()/1000),studioVersion:'0.10.1',gpuName:sample.gpuName||'未检测到',driverVersion:sample.driverVersion,vramTotalMb:sample.vramTotal,peakVramUsedMb:sample.peakVram,ramTotalMb:sample.ramTotal,peakRamUsedMb:sample.peakRam,runtimeVersion:comfyUrl,h3PatchCommit:h3Patch?.commit||'',generationMode:sample.mode,width:sample.width,height:sample.height,durationSeconds:sample.duration,steps:sample.steps,modelFile:sample.modelFile,enabledPlugins:Object.entries(pluginLock.plugins).filter(([,item])=>item.enabled).map(([id])=>id),elapsedSeconds:(Date.now()-sample.startedAt)/1000,outcome:'failed',errorSummary:value.error||'ComfyUI 执行失败',outputFile:''}}).catch(()=>{})
+          if(sample)await invoke('benchmark_save',{report:{schemaVersion:1,reportId:value.promptId,createdAt:Math.floor(Date.now()/1000),studioVersion:'0.10.2',executionTarget:sample.executionTarget,resourceSamplingSeconds:sample.resourceSamplingSeconds,gpuName:sample.gpuName||'未检测到',driverVersion:sample.driverVersion,vramTotalMb:sample.vramTotal,peakVramUsedMb:sample.peakVram,ramTotalMb:sample.ramTotal,peakRamUsedMb:sample.peakRam,runtimeVersion:comfyUrl,h3PatchCommit:h3Patch?.commit||'',generationMode:sample.mode,width:sample.width,height:sample.height,durationSeconds:sample.duration,steps:sample.steps,modelFile:sample.modelFile,enabledPlugins:Object.entries(pluginLock.plugins).filter(([,item])=>item.enabled).map(([id])=>id),elapsedSeconds:(Date.now()-sample.startedAt)/1000,outcome:'failed',errorSummary:value.error||'ComfyUI 执行失败',outputFile:''}}).catch(()=>{})
           if(activeJobId)await invoke('update_job',{patch:{id:activeJobId,status:'failed',stage:'生成失败',progress:1,planJson:null,outputPath:null,errorSummary:value.error||'ComfyUI 执行失败'}}).catch(()=>{})
           benchmarkRef.current=null;setActivePromptId('');setActiveJobId('');setGenerating(false)
         }
@@ -303,7 +304,8 @@ function App() {
     try {
       setJobMessage(assets.length?'正在上传素材并编译工作流…':'正在编译并提交工作流…')
       const started=await invoke<StartedGeneration>('start_h3_generation',{input:request})
-      benchmarkRef.current={startedAt:Date.now(),mode:workflowMode,width:localWidth,height:localHeight,duration,steps,modelFile:workflowMode==='ref2va'?'minimax_h3_ref2va_pruned_int8_convrot.safetensors':'minimax_h3_fl2va_pruned_int8_convrot.safetensors',gpuName:system?.gpu?.name||'',driverVersion:system?.gpu?.driverVersion||'',vramTotal:system?.gpu?.memoryTotalMb||0,peakVram:system?.gpu?.memoryUsedMb||0,ramTotal:system?.memoryTotalMb||0,peakRam:system?.memoryUsedMb||0}
+      const remoteGpu=sshStatus?.running?autoDlProbe?.gpus[0]:undefined
+      benchmarkRef.current={startedAt:Date.now(),executionTarget:remoteGpu?'remote_autodl':'local',resourceSamplingSeconds:remoteGpu?0:3,mode:workflowMode,width:localWidth,height:localHeight,duration,steps,modelFile:workflowMode==='ref2va'?'minimax_h3_ref2va_pruned_int8_convrot.safetensors':'minimax_h3_fl2va_pruned_int8_convrot.safetensors',gpuName:remoteGpu?.name||system?.gpu?.name||'',driverVersion:remoteGpu?.driverVersion||system?.gpu?.driverVersion||'',vramTotal:remoteGpu?.vramMib||system?.gpu?.memoryTotalMb||0,peakVram:remoteGpu?0:system?.gpu?.memoryUsedMb||0,ramTotal:remoteGpu?autoDlProbe?.ramTotalMib||0:system?.memoryTotalMb||0,peakRam:remoteGpu?0:system?.memoryUsedMb||0}
       const job = await invoke<{id:string}>('create_job', { input:{ name:`${modeContent[mode].title} · ${new Date().toLocaleTimeString()}`, requestJson:JSON.stringify({...request,promptId:started.promptId}), backendId:started.promptId } })
       setActiveJobId(job.id);setActivePromptId(started.promptId);setGenerationPoll({status:'queued',promptId:started.promptId,queuePosition:started.queueNumber,outputs:[]})
       setJobMessage(`任务 ${job.id} 已提交 ComfyUI${started.queueNumber!==undefined?` · 队列编号 ${started.queueNumber}`:''}`)
@@ -506,6 +508,16 @@ function App() {
   const openSettings = async () => {
     setSettingsDialog(true)
     invoke<BenchmarkReport[]>('benchmark_list').then(setBenchmarkReports).catch(()=>setBenchmarkReports([]))
+  }
+
+  const exportAnonymousBenchmarks = async () => {
+    setBenchmarkExportMessage('')
+    const destination=await save({defaultPath:'langbai-h3-匿名基准报告.json',filters:[{name:'JSON 基准报告',extensions:['json']}]})
+    if(typeof destination!=='string')return
+    try{
+      const written=await invoke<string>('benchmark_export_anonymous',{destination})
+      setBenchmarkExportMessage(`匿名基准报告已保存：${written}`)
+    }catch(error){setBenchmarkExportMessage(String(error))}
   }
 
   const choosePluginPackage = async () => {
@@ -761,13 +773,15 @@ function App() {
           <div className="url-row"><input id="output-path" value={outputPath} onChange={e=>{setOutputPath(e.target.value);setPathMessage('')}} /><button onClick={chooseOutputPath}>选择目录</button><button onClick={validatePath}>验证</button></div>
           {pathMessage && <div className={`probe-message ${pathMessage.includes('可写')?'success':'error'}`}><ShieldCheck/><span><strong>{pathMessage}</strong><small>后续任务可单独覆盖此目录。</small></span></div>}
           <div className="section-divider"><span>软件更新</span></div>
-          <div className="update-row"><div><strong>GitHub Releases</strong><small>当前 v0.6.3 · 包含预览版本 · 下载支持断点续传和 SHA-256 校验</small></div><button onClick={checkUpdate} disabled={checkingUpdate}>{checkingUpdate?'检查中…':'检查更新'}</button></div>
+          <div className="update-row"><div><strong>GitHub Releases</strong><small>当前 v0.10.2 · 包含预览版本 · 下载支持断点续传和 SHA-256 校验</small></div><button onClick={checkUpdate} disabled={checkingUpdate}>{checkingUpdate?'检查中…':'检查更新'}</button></div>
           {updateCandidate&&!downloadedUpdate&&<div className="update-candidate"><span><strong>{updateCandidate.version}</strong><small>{updateCandidate.fileName}</small></span><button onClick={downloadUpdate}>下载更新</button></div>}
           {updateProgress&&!downloadedUpdate&&<div className="runtime-progress"><div><span>更新下载</span><strong>{Math.round(updateProgress.progressPercent||0)}%</strong></div><div className="progress"><span style={{width:`${updateProgress.progressPercent||0}%`}}/></div><small>{updateProgress.bytesPerSecond?`${(updateProgress.bytesPerSecond/1024/1024).toFixed(1)} MB/s`:'正在准备'} {updateProgress.etaSeconds?`· 剩余约 ${Math.ceil(updateProgress.etaSeconds/60)} 分钟`:''}</small></div>}
           {downloadedUpdate&&<button className="primary wide update-install" onClick={launchUpdate}>关闭软件并安装 {downloadedUpdate.version}</button>}
           {updateMessage&&<div className={`probe-message ${updateMessage.includes('通过')||updateMessage.includes('最新')?'success':updateMessage.includes('发现')?'success':'error'}`}><ShieldCheck/><span><strong>{updateMessage}</strong><small>{downloadedUpdate?`SHA-256 ${downloadedUpdate.sha256}`:'更新只从本项目 GitHub Release 获取'}</small></span></div>}
           <div className="section-divider"><span>本机兼容性记录</span></div>
-          <div className="benchmark-list">{benchmarkReports.length===0?<div className="empty-result">完成一次真实生成后，这里会显示峰值显存、内存和耗时</div>:benchmarkReports.slice(0,5).map(item=><article key={item.reportId}><div className={`job-state ${item.outcome}`}>{item.outcome==='completed'?'通过':'失败'}</div><div><strong>{item.gpuName} · {item.generationMode.toUpperCase()}</strong><small>{item.width}×{item.height} · {item.durationSeconds}s · 耗时 {Math.round(item.elapsedSeconds)}s</small><span>峰值显存 {(item.peakVramUsedMb/1024).toFixed(1)}/{(item.vramTotalMb/1024).toFixed(1)} GB · 插件 {item.enabledPlugins.length}</span></div></article>)}</div>
+          <div className="benchmark-export"><div><strong>导出匿名基准报告</strong><small>只包含硬件、模型文件名、生成规格、耗时和插件；排除提示词、素材、输出路径、ComfyUI 地址、任务 ID 与错误详情。</small></div><button onClick={exportAnonymousBenchmarks} disabled={benchmarkReports.length===0}><Download/> 导出 JSON</button></div>
+          {benchmarkExportMessage&&<div className={`probe-message ${benchmarkExportMessage.includes('已保存')?'success':'error'}`}><ShieldCheck/><span><strong>{benchmarkExportMessage}</strong></span></div>}
+          <div className="benchmark-list">{benchmarkReports.length===0?<div className="empty-result">完成一次真实生成后，这里会显示采样观察显存、内存和耗时</div>:benchmarkReports.slice(0,5).map(item=><article key={item.reportId}><div className={`job-state ${item.outcome}`}>{item.outcome==='completed'?'通过':'失败'}</div><div><strong>{item.gpuName} · {item.executionTarget==='remote_autodl'?'AutoDL 远程':'本机'} · {item.generationMode.toUpperCase()}</strong><small>{item.width}×{item.height} · {item.durationSeconds}s · 耗时 {Math.round(item.elapsedSeconds)}s</small><span>{item.resourceSamplingSeconds?`${item.resourceSamplingSeconds} 秒采样观察显存 ${(item.peakVramUsedMb/1024).toFixed(1)}/${(item.vramTotalMb/1024).toFixed(1)} GB`:`远端资源采样待启用 · 显存总量 ${(item.vramTotalMb/1024).toFixed(1)} GB`} · 插件 {item.enabledPlugins.length}</span></div></article>)}</div>
         </section>
       </div>}
     </div>

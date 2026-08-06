@@ -8,7 +8,7 @@
 - 默认把视频保存到安装程序同级 `output`，也可固定自定义目录或每次生成前询问
 - KJNodes H3 SageAttention 可安装并真实插入 H3 API Graph；未经 H3 验证的插件不会标记为兼容
 
-Windows x64 Preview 安装包：[`Langbai-H3-Studio_0.10.1_x64-setup.exe`](release/v0.10.1/Langbai-H3-Studio_0.10.1_x64-setup.exe)
+Windows x64 Preview 安装包：[`Langbai-H3-Studio_0.10.2_x64-setup.exe`](release/v0.10.2/Langbai-H3-Studio_0.10.2_x64-setup.exe)
 
 SHA-256：`B9E6BBAB672D8253539BEAC2FED7E868FAFE355A98DB1910DD2891713703453D`
 

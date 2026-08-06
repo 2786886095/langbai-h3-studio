@@ -11,12 +11,16 @@ pub struct CompatibilityReport {
     pub report_id: String,
     pub created_at: u64,
     pub studio_version: String,
+    #[serde(default = "default_execution_target")]
+    pub execution_target: String,
     pub gpu_name: String,
     pub driver_version: String,
     pub vram_total_mb: u64,
     pub peak_vram_used_mb: u64,
     pub ram_total_mb: u64,
     pub peak_ram_used_mb: u64,
+    #[serde(default = "default_sampling_seconds")]
+    pub resource_sampling_seconds: u32,
     pub runtime_version: String,
     pub h3_patch_commit: String,
     pub generation_mode: String,
@@ -34,6 +38,9 @@ pub struct CompatibilityReport {
     #[serde(default)]
     pub output_file: String,
 }
+
+fn default_execution_target() -> String { "local".into() }
+fn default_sampling_seconds() -> u32 { 3 }
 
 impl CompatibilityReport {
     pub fn validate(&self) -> Result<(), String> {
@@ -83,8 +90,8 @@ pub fn save_report(root: &Path, report: &CompatibilityReport) -> Result<PathBuf,
     fs::create_dir_all(root).map_err(|e| format!("创建兼容性报告目录失败：{e}"))?;
     let destination = root.join(format!("{}.json", report.report_id));
     let temporary = destination.with_extension("json.tmp");
-    let bytes =
-        serde_json::to_vec_pretty(report).map_err(|e| format!("序列化兼容性报告失败：{e}"))?;
+    let bytes = serde_json::to_vec_pretty(report)
+        .map_err(|e| format!("序列化兼容性报告失败：{e}"))?;
     fs::write(&temporary, bytes).map_err(|e| format!("写入兼容性报告失败：{e}"))?;
     fs::rename(&temporary, &destination).map_err(|e| format!("提交兼容性报告失败：{e}"))?;
     Ok(destination)
@@ -97,7 +104,7 @@ pub fn list_reports(root: &Path) -> Result<Vec<CompatibilityReport>, String> {
     let mut reports = Vec::new();
     for entry in fs::read_dir(root).map_err(|e| format!("读取兼容性报告失败：{e}"))? {
         let path = entry.map_err(|e| e.to_string())?.path();
-        if path.extension().and_then(|v| v.to_str()) != Some("json") {
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
             continue;
         }
         let report: CompatibilityReport =
@@ -110,21 +117,126 @@ pub fn list_reports(root: &Path) -> Result<Vec<CompatibilityReport>, String> {
     Ok(reports)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AnonymousBenchmarkReport {
+    pub created_day: u64,
+    pub studio_version: String,
+    pub execution_target: String,
+    pub gpu_name: String,
+    pub driver_version: String,
+    pub vram_total_mb: u64,
+    pub peak_vram_used_mb: u64,
+    pub ram_total_mb: u64,
+    pub peak_ram_used_mb: u64,
+    pub resource_sampling_seconds: u32,
+    pub h3_patch_commit: String,
+    pub generation_mode: String,
+    pub width: u32,
+    pub height: u32,
+    pub duration_seconds: f32,
+    pub steps: u32,
+    pub model_file_name: String,
+    pub enabled_plugins: Vec<String>,
+    pub elapsed_seconds: f64,
+    pub outcome: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AnonymousBenchmarkBundle {
+    pub schema_version: u32,
+    pub exported_at: u64,
+    pub privacy_notice: String,
+    pub reports: Vec<AnonymousBenchmarkReport>,
+}
+
+pub fn anonymous_bundle(
+    reports: &[CompatibilityReport],
+    exported_at: u64,
+) -> AnonymousBenchmarkBundle {
+    let reports = reports
+        .iter()
+        .map(|item| AnonymousBenchmarkReport {
+            created_day: item.created_at - item.created_at % 86_400,
+            studio_version: item.studio_version.clone(),
+            execution_target: item.execution_target.clone(),
+            gpu_name: item.gpu_name.clone(),
+            driver_version: item.driver_version.clone(),
+            vram_total_mb: item.vram_total_mb,
+            peak_vram_used_mb: item.peak_vram_used_mb,
+            ram_total_mb: item.ram_total_mb,
+            peak_ram_used_mb: item.peak_ram_used_mb,
+            resource_sampling_seconds: item.resource_sampling_seconds,
+            h3_patch_commit: item.h3_patch_commit.clone(),
+            generation_mode: item.generation_mode.clone(),
+            width: item.width,
+            height: item.height,
+            duration_seconds: item.duration_seconds,
+            steps: item.steps,
+            model_file_name: Path::new(&item.model_file)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("未命名模型")
+                .to_string(),
+            enabled_plugins: item.enabled_plugins.clone(),
+            elapsed_seconds: item.elapsed_seconds,
+            outcome: item.outcome.clone(),
+        })
+        .collect();
+    AnonymousBenchmarkBundle {
+        schema_version: 1,
+        exported_at,
+        privacy_notice: "不包含提示词、输入素材、输出路径、ComfyUI 地址、任务 ID 或错误详情"
+            .into(),
+        reports,
+    }
+}
+
+pub fn export_anonymous(
+    root: &Path,
+    destination: &Path,
+    exported_at: u64,
+) -> Result<PathBuf, String> {
+    if !destination.is_absolute()
+        || destination.extension().and_then(|value| value.to_str()) != Some("json")
+    {
+        return Err("请选择以 .json 结尾的绝对保存路径".into());
+    }
+    let parent = destination
+        .parent()
+        .ok_or_else(|| "基准报告保存目录无效".to_string())?;
+    fs::create_dir_all(parent).map_err(|e| format!("创建基准报告保存目录失败：{e}"))?;
+    let reports = list_reports(root)?;
+    if reports.is_empty() {
+        return Err("完成至少一次真实生成后才能导出基准报告".into());
+    }
+    let bytes = serde_json::to_vec_pretty(&anonymous_bundle(&reports, exported_at))
+        .map_err(|e| format!("序列化匿名基准报告失败：{e}"))?;
+    let temporary = destination.with_extension("json.tmp");
+    fs::write(&temporary, bytes).map_err(|e| format!("写入匿名基准报告失败：{e}"))?;
+    fs::rename(&temporary, destination).map_err(|e| format!("提交匿名基准报告失败：{e}"))?;
+    Ok(destination.to_path_buf())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
     fn report() -> CompatibilityReport {
         CompatibilityReport {
             schema_version: 1,
             report_id: "job-1".into(),
-            created_at: 1,
-            studio_version: "0.6.1".into(),
+            created_at: 90_000,
+            studio_version: "0.10.1".into(),
+            execution_target: "local".into(),
             gpu_name: "RTX".into(),
             driver_version: "1".into(),
-            vram_total_mb: 24000,
-            peak_vram_used_mb: 20000,
-            ram_total_mb: 64000,
-            peak_ram_used_mb: 40000,
+            vram_total_mb: 24_000,
+            peak_vram_used_mb: 20_000,
+            ram_total_mb: 64_000,
+            peak_ram_used_mb: 40_000,
+            resource_sampling_seconds: 3,
             runtime_version: "runtime".into(),
             h3_patch_commit: "commit".into(),
             generation_mode: "t2v".into(),
@@ -140,6 +252,7 @@ mod tests {
             output_file: "D:/out.mp4".into(),
         }
     }
+
     #[test]
     fn saves_and_lists_reports_atomically() {
         let temp = tempfile::tempdir().unwrap();
@@ -147,10 +260,30 @@ mod tests {
         assert!(path.is_file());
         assert_eq!(list_reports(temp.path()).unwrap().len(), 1);
     }
+
     #[test]
     fn rejects_impossible_peak_usage() {
         let mut value = report();
-        value.peak_vram_used_mb = 25000;
+        value.peak_vram_used_mb = 25_000;
         assert!(value.validate().is_err());
+    }
+
+    #[test]
+    fn anonymous_export_removes_paths_ids_urls_and_errors() {
+        let source = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let mut value = report();
+        value.runtime_version = "http://127.0.0.1:8188/private".into();
+        value.model_file = "D:/models/private/model.safetensors".into();
+        value.output_file = "D:/users/name/output/video.mp4".into();
+        value.error_summary = "private stack trace".into();
+        save_report(source.path(), &value).unwrap();
+        let destination = output.path().join("anonymous.json");
+        export_anonymous(source.path(), &destination, 123).unwrap();
+        let raw = fs::read_to_string(destination).unwrap();
+        assert!(raw.contains("model.safetensors"));
+        for secret in ["job-1", "127.0.0.1", "D:/users", "D:/models", "private stack"] {
+            assert!(!raw.contains(secret));
+        }
     }
 }

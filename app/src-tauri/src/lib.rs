@@ -54,6 +54,16 @@ fn benchmark_list() -> Result<Vec<benchmark::CompatibilityReport>, String> {
     benchmark::list_reports(&benchmark_root())
 }
 
+#[tauri::command]
+fn benchmark_export_anonymous(destination: String) -> Result<String, String> {
+    let exported_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "系统时间早于 UNIX 纪元".to_string())?
+        .as_secs();
+    benchmark::export_anonymous(&benchmark_root(), &PathBuf::from(destination), exported_at)
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
 const RUNTIME_NVIDIA_MANIFEST: &str =
     include_str!("../resources/runtime/manifests/comfyui-v0.30.0-nvidia.json");
 const RUNTIME_CU126_MANIFEST: &str =
@@ -1413,6 +1423,7 @@ pub fn run() {
             probe_system,
             benchmark_save,
             benchmark_list,
+            benchmark_export_anonymous,
             probe_comfyui,
             validate_output_path,
             default_output_path,
