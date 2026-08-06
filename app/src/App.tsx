@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { open } from '@tauri-apps/plugin-dialog'
@@ -38,13 +38,19 @@ const modeContent = {
   reference: { title: '全模态参考', desc: '用图片、视频和音频共同定义角色、动作与声音。' },
 }
 
+function readDraft(): Partial<{prompt:string;duration:number;steps:number;mode:Mode}> {
+  try{return JSON.parse(localStorage.getItem('langbai-h3-draft')||'{}')}catch{return {}}
+}
+
 function App() {
+  const initialDraft = useRef(readDraft()).current
   const [dark, setDark] = useState(false)
-  const [mode, setMode] = useState<Mode>('text')
+  const [mode, setMode] = useState<Mode>(initialDraft.mode&&['text','frames','reference'].includes(initialDraft.mode)?initialDraft.mode:'text')
   const [advanced, setAdvanced] = useState(false)
   const [generating, setGenerating] = useState(false)
-  const [duration, setDuration] = useState(8)
-  const [prompt, setPrompt] = useState('一艘银白色飞船掠过紫色星云，镜头缓慢推进。远处恒星闪烁，配合低沉而辽阔的环境音。')
+  const [duration, setDuration] = useState(initialDraft.duration||8)
+  const [steps, setSteps] = useState(initialDraft.steps||20)
+  const [prompt, setPrompt] = useState(initialDraft.prompt||'一艘银白色飞船掠过紫色星云，镜头缓慢推进。远处恒星闪烁，配合低沉而辽阔的环境音。')
   const [system, setSystem] = useState<SystemProbe | null>(null)
   const [engineDialog, setEngineDialog] = useState(false)
   const [comfyUrl, setComfyUrl] = useState('http://127.0.0.1:8188')
@@ -99,8 +105,7 @@ function App() {
   const [memoryProfile, setMemoryProfile] = useState<'auto'|'conservative'|'minimum'>('auto')
   const [managedStatus, setManagedStatus] = useState<ManagedRuntimeStatus | null>(null)
   const [managedMessage, setManagedMessage] = useState('')
-  const estimate = useMemo(() => duration <= 6 ? '约 8–12 分钟' : duration <= 10 ? '约 14–20 分钟' : '约 22–30 分钟', [duration])
-
+  const [workflowDialog, setWorkflowDialog] = useState(false)
   useEffect(() => {
     invoke<SystemProbe>('probe_system').then(value=>{setSystem(value);if(value.gpu&&value.gpu.memoryTotalMb<16000)setMemoryProfile('conservative')}).catch(() => {})
     invoke<RuntimeManifest[]>('runtime_manifests').then(setRuntimeManifests).catch(()=>{})
@@ -116,6 +121,7 @@ function App() {
     ]).catch(()=>[] as Array<()=>void>)
     return ()=>{unlisteners.then(items=>items.forEach(fn=>fn()))}
   }, [])
+  useEffect(()=>{try{localStorage.setItem('langbai-h3-draft',JSON.stringify({prompt,duration,steps,mode}))}catch{}},[prompt,duration,steps,mode])
   useEffect(()=>{
     if(!activePromptId) return
     let stopped=false
@@ -188,17 +194,23 @@ function App() {
 
   const removeAsset = (path:string) => setAssets(items=>items.filter(item=>item.path!==path))
 
+  const appendPromptHint = (hint:string) => setPrompt(value=>`${value.trim()}${value.trim()?'，':''}${hint}`.slice(0,2000))
+
+  const restoreDraft = () => {
+    try{const value=JSON.parse(localStorage.getItem('langbai-h3-draft')||'{}');if(typeof value.prompt==='string')setPrompt(value.prompt);if(typeof value.duration==='number')setDuration(value.duration);if(typeof value.steps==='number')setSteps(value.steps);if(['text','frames','reference'].includes(value.mode))setMode(value.mode)}catch{setJobMessage('没有可恢复的草稿')}
+  }
+
   const createGenerationJob = async () => {
     setGenerating(true); setJobMessage('')
     if(!prompt.trim()){setJobMessage('请先填写视频描述');setGenerating(false);return}
     if(mode==='frames'&&assets.length===0){setJobMessage('首尾帧模式至少需要选择一张图片');setGenerating(false);return}
     if(mode==='reference'&&assets.length===0){setJobMessage('全模态参考模式至少需要选择一个素材');setGenerating(false);return}
     const workflowMode=mode==='text'?'t2v':mode==='frames'?'fl2va':'ref2va'
-    const request = { mode:workflowMode, prompt, width:1344, height:768, durationSeconds:duration, seed:Date.now(), steps:20, referenceImageSize:'match', outputDirectory:outputPath, baseUrl:comfyUrl, assets:assets.map(({path,mime,kind,role})=>({path,mime,kind,role})) }
+    const request = { mode:workflowMode, prompt, width:1344, height:768, durationSeconds:duration, seed:Date.now(), steps, referenceImageSize:'match', outputDirectory:outputPath, baseUrl:comfyUrl, assets:assets.map(({path,mime,kind,role})=>({path,mime,kind,role})) }
     try {
       setJobMessage(assets.length?'正在上传素材并编译工作流…':'正在编译并提交工作流…')
       const started=await invoke<StartedGeneration>('start_h3_generation',{input:request})
-      benchmarkRef.current={startedAt:Date.now(),mode:workflowMode,width:1344,height:768,duration,steps:20,modelFile:workflowMode==='ref2va'?'minimax_h3_ref2va_pruned_int8_convrot.safetensors':'minimax_h3_fl2va_pruned_int8_convrot.safetensors',gpuName:system?.gpu?.name||'',driverVersion:system?.gpu?.driverVersion||'',vramTotal:system?.gpu?.memoryTotalMb||0,peakVram:system?.gpu?.memoryUsedMb||0,ramTotal:system?.memoryTotalMb||0,peakRam:system?.memoryUsedMb||0}
+      benchmarkRef.current={startedAt:Date.now(),mode:workflowMode,width:1344,height:768,duration,steps,modelFile:workflowMode==='ref2va'?'minimax_h3_ref2va_pruned_int8_convrot.safetensors':'minimax_h3_fl2va_pruned_int8_convrot.safetensors',gpuName:system?.gpu?.name||'',driverVersion:system?.gpu?.driverVersion||'',vramTotal:system?.gpu?.memoryTotalMb||0,peakVram:system?.gpu?.memoryUsedMb||0,ramTotal:system?.memoryTotalMb||0,peakRam:system?.memoryUsedMb||0}
       const job = await invoke<{id:string}>('create_job', { input:{ name:`${modeContent[mode].title} · ${new Date().toLocaleTimeString()}`, requestJson:JSON.stringify({...request,promptId:started.promptId}), backendId:started.promptId } })
       setActivePromptId(started.promptId);setGenerationPoll({status:'queued',promptId:started.promptId,queuePosition:started.queueNumber,outputs:[]})
       setJobMessage(`任务 ${job.id} 已提交 ComfyUI${started.queueNumber!==undefined?` · 队列编号 ${started.queueNumber}`:''}`)
@@ -314,7 +326,7 @@ function App() {
     try {
       const installed = await invoke<{modelRoot:string;totalSize:number}>('download_h3_bundle',{bundleId:selectedBundle,licenseAccepted})
       setModelProgress({phase:'completed',progressPercent:100})
-      setModelInstallMessage(`??????????? ? ${(installed.totalSize/1024/1024/1024).toFixed(1)} GiB ? ${installed.modelRoot}`)
+      setModelInstallMessage(`模型安装完成并通过校验 · ${(installed.totalSize/1024/1024/1024).toFixed(1)} GiB · ${installed.modelRoot}`)
     } catch(error) { setModelInstallMessage(String(error)) }
     finally { setInstallingModel(false) }
   }
@@ -328,7 +340,7 @@ function App() {
           <button className="nav-item" onClick={openHistory}><Clock3/><span>生成记录</span><b>{jobs.length || 3}</b></button>
           <button className="nav-item" onClick={()=>setModelDialog(true)}><Boxes/><span>模型中心</span></button>
           <button className="nav-item" onClick={openPlugins}><Zap/><span>加速插件</span><b>{Object.keys(pluginLock.plugins).length||''}</b></button>
-          <button className="nav-item"><LayoutGrid/><span>工作流</span></button>
+          <button className="nav-item" onClick={()=>setWorkflowDialog(true)}><LayoutGrid/><span>工作流</span></button>
         </nav>
         <div className="sidebar-bottom">
           <div className="runtime-card"><div className="runtime-title"><span className="status-dot"/>{gpu ? '硬件检测完成' : '原型预览模式'}</div><small>{gpu ? `${gpu.name} · ${(gpu.memoryTotalMb/1024).toFixed(0)} GB` : 'RTX 4090 · 24 GB'}</small><div className="memory"><span style={{width:`${gpuPercent}%`}}/></div><small>{gpu ? `显存 ${(gpu.memoryUsedMb/1024).toFixed(1)} / ${(gpu.memoryTotalMb/1024).toFixed(0)} GB` : '显存 7.4 / 24 GB'}</small></div>
@@ -351,7 +363,7 @@ function App() {
         <div className="workspace">
           <section className="intro">
             <div><span className="eyebrow"><Sparkles/> 简单创作，专业生成</span><h1>今天想创造什么？</h1><p>选择一种生成方式，Langbai H3 Studio 会为你的显卡自动匹配最佳设置。</p></div>
-            <button className="draft-button"><RotateCcw/> 恢复上次草稿</button>
+            <button className="draft-button" onClick={restoreDraft}><RotateCcw/> 恢复上次草稿</button>
           </section>
 
           <div className="mode-tabs" role="tablist">
@@ -366,7 +378,7 @@ function App() {
               <div className="field">
                 <div className="label-row"><label htmlFor="prompt">描述你的视频</label><button onClick={()=>setHelpDialog(true)}><Info/> 参数与提示词说明</button></div>
                 <div className="textarea-wrap"><textarea id="prompt" value={prompt} onChange={e=>setPrompt(e.target.value)} maxLength={2000}/><span>{prompt.length} / 2000</span></div>
-                <div className="suggestions"><span>试试添加：</span><button>镜头运动</button><button>光线氛围</button><button>环境音效</button><button>对白</button></div>
+                <div className="suggestions"><span>试试添加：</span><button onClick={()=>appendPromptHint('镜头缓慢推进并保持主体居中')}>镜头运动</button><button onClick={()=>appendPromptHint('电影感侧逆光与柔和体积雾')}>光线氛围</button><button onClick={()=>appendPromptHint('包含与动作同步的环境音和空间回声')}>环境音效</button><button onClick={()=>appendPromptHint('角色对白清晰自然，口型与声音同步')}>对白</button></div>
               </div>
 
               <div className="setting-grid">
@@ -377,12 +389,12 @@ function App() {
               </div>
 
               <button className="advanced-toggle" onClick={()=>setAdvanced(!advanced)}><span><Settings/> 高级设置 <small>采样、卸载与加速选项</small></span><ChevronDown className={advanced?'rotated':''}/></button>
-              {advanced && <div className="advanced-panel"><div><label>采样步数 <b>20</b></label><input type="range" min="12" max="50" defaultValue="20"/></div><div><label>显存策略</label><button className="select"><span>自动平衡（运行时检测）</span><ChevronDown/></button></div><div><label>加速方案</label><button className="select"><span><Zap/> 自动选择（安装后检测）</span><ChevronDown/></button></div></div>}
+              {advanced && <div className="advanced-panel"><div><label>采样步数 <b>{steps}</b></label><input type="range" min="12" max="50" value={steps} onChange={event=>setSteps(Number(event.target.value))}/></div><div><label>显存策略</label><button className="select" onClick={()=>setEngineDialog(true)}><span>{memoryProfile==='auto'?'自动动态显存':memoryProfile==='conservative'?'保守低显存':'最小显存'}</span><ChevronDown/></button></div><div><label>加速方案</label><button className="select" onClick={openPlugins}><span><Zap/> {Object.entries(pluginLock.plugins).filter(([,item])=>item.enabled).length?`${Object.entries(pluginLock.plugins).filter(([,item])=>item.enabled).length} 个插件已启用`:'使用 ComfyUI 原生优化'}</span><ChevronDown/></button></div></div>}
             </section>
 
             <aside className="summary-card">
               <div className="preview"><div className="preview-art"><div className="orbit one"/><div className="orbit two"/><Aperture/><span>生成预览将在这里显示</span></div><button className="expand">↗</button></div>
-              <div className="summary-body"><h2>生成准备</h2><div className="summary-row"><span><Cpu/> 运行方案</span><strong>单卡优化</strong></div><div className="summary-row"><span><HardDrive/> 预计显存</span><strong className="good">约 19.6 GB</strong></div><div className="summary-row"><span><Clock3/> 预计耗时</span><strong>{estimate}</strong></div><div className="summary-row"><span><FolderOpen/> 保存到</span><button onClick={()=>setSettingsDialog(true)}>{outputPath} <ChevronRight/></button></div>
+              <div className="summary-body"><h2>生成准备</h2><div className="summary-row"><span><Cpu/> 运行方案</span><strong>{memoryProfile==='auto'?'动态显存':'低显存卸载'}</strong></div><div className="summary-row"><span><HardDrive/> 峰值显存</span><strong>首次生成后记录</strong></div><div className="summary-row"><span><Clock3/> 预计耗时</span><strong>由本机实测生成</strong></div><div className="summary-row"><span><FolderOpen/> 保存到</span><button onClick={openSettings}>{outputPath} <ChevronRight/></button></div>
                 <div className="fit-notice"><ShieldCheck/><span><strong>{gpu&&gpu.memoryTotalMb>=24000?'达到建议显存':'需要兼容性实测'}</strong><small>{gpu?`${(gpu.memoryTotalMb/1024).toFixed(0)}GB 显存 · 建议 24GB 显存与 64GB 内存`:'未检测到 NVIDIA 显卡信息'}</small></span></div>
                 <button className="generate" onClick={createGenerationJob} disabled={generating||!h3Ready}>{generating ? <><span className="spinner"/> {generationPoll?.status==='running'?'正在生成视频…':generationPoll?.status==='queued'?'正在排队…':'正在提交素材…'}</> : <><Play/> {h3Ready?'开始生成视频':'请先连接 H3 运行环境'}</>}</button><p className="queue-note">{generationPoll?.status==='failed'?`生成失败：${generationPoll.error||'ComfyUI 执行错误'}`:jobMessage || (h3Ready?'运行环境已通过 H3 节点校验':'在“运行环境”中安装或连接 ComfyUI，并验证 H3 必需节点')}</p>
               </div>
@@ -390,7 +402,7 @@ function App() {
           </div>
 
           <section className="download-card">
-            <div className="model-icon"><Download/></div><div className="download-info"><div><strong>MiniMax-H3 ??????</strong><span className="tag">?????</span></div><p>??? 39.6 GiB?42.5 GB?? ?? 24GB ??? 64GB ?? ? ??????? SHA-256 ??</p><small>??????????????????????????????????????</small></div><button onClick={()=>setModelDialog(true)}>??????</button>
+            <div className="model-icon"><Download/></div><div className="download-info"><div><strong>MiniMax-H3 单卡优化模型</strong><span className="tag">官方工作流</span></div><p>每套约 39.6 GiB（42.5 GB）· 建议 24GB 显存和 64GB 内存 · 支持断点续传与 SHA-256 校验</p><small>模型不会自动下载。请在模型中心选择文生视频或全模态参考版本，并确认模型许可证。</small></div><button onClick={()=>setModelDialog(true)}>打开模型中心</button>
           </section>
         </div>
       </main>
@@ -444,6 +456,18 @@ function App() {
           <div className="section-divider"><span>已安装</span></div>
           <div className="plugin-list">{Object.keys(pluginLock.plugins).length===0?<div className="empty-result">尚未安装社区插件</div>:Object.entries(pluginLock.plugins).map(([id,item])=><article key={id}><div className="model-icon"><Zap/></div><div><strong>{id}</strong><small>v{item.version} · {item.provides.join('、')||'声明式适配'}</small></div><button onClick={()=>togglePlugin(id,!item.enabled)}>{item.enabled?'已启用':'已停用'}</button><button className="danger-link" onClick={()=>uninstallPlugin(id)}>卸载</button></article>)}</div>
           {pluginMessage&&<div className={`probe-message ${pluginMessage.includes('通过')||pluginMessage.includes('已安装')||pluginMessage.includes('已卸载')?'success':'error'}`}><ShieldCheck/><span><strong>{pluginMessage}</strong><small>插件状态写入当前托管 Runtime Profile 的 lock.json。</small></span></div>}
+        </section>
+      </div>}
+      {workflowDialog && <div className="modal-backdrop" role="presentation" onMouseDown={e=>{if(e.target===e.currentTarget)setWorkflowDialog(false)}}>
+        <section className="modal model-modal" role="dialog" aria-modal="true" aria-labelledby="workflow-title">
+          <div className="modal-head"><div><span className="eyebrow"><LayoutGrid/> 语义工作流</span><h2 id="workflow-title">选择创作方式，不需要连接节点</h2></div><button className="icon-button" onClick={()=>setWorkflowDialog(false)} aria-label="关闭对话框"><X/></button></div>
+          <p>Studio 根据素材类型和模式构建官方 H3 API Graph。节点编号、连接和模型组件由后端管理，不会暴露给创作者。</p>
+          <div className="workflow-list">
+            <article><div className="workflow-symbol"><Sparkles/></div><div><strong>文字生成视频</strong><small>提示词 → 原生音视频 · FL2VA INT8 模型 · 24 FPS</small><span>适合从零创作；无需参考素材</span></div><button onClick={()=>{setMode('text');setWorkflowDialog(false)}}>使用</button></article>
+            <article><div className="workflow-symbol"><Image/></div><div><strong>首尾帧生成</strong><small>1–2 张图片 + 提示词 → 原生音视频 · FL2VA INT8 模型</small><span>首帧约束开场，尾帧约束结尾</span></div><button onClick={()=>{setMode('frames');setWorkflowDialog(false)}}>使用</button></article>
+            <article><div className="workflow-symbol"><Video/></div><div><strong>全模态参考生成</strong><small>图片、视频、音频 + 提示词 → Ref2VA INT8 模型</small><span>最多 9 张图片、3 个视频和 3 个独立音频</span></div><button onClick={()=>{setMode('reference');setWorkflowDialog(false)}}>使用</button></article>
+          </div>
+          <div className={`probe-message ${h3Ready?'success':'error'}`}><ShieldCheck/><span><strong>{h3Ready?'当前 ComfyUI 已通过 H3 节点校验':'当前环境尚未通过 H3 节点校验'}</strong><small>工作流会在提交前再次按实际素材检查所有 LoadImage、LoadVideo、LoadAudio 和 H3 节点。</small></span></div>
         </section>
       </div>}
       {helpDialog && <div className="modal-backdrop" role="presentation" onMouseDown={e=>{if(e.target===e.currentTarget)setHelpDialog(false)}}>
