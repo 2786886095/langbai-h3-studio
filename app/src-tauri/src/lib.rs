@@ -72,6 +72,92 @@ fn model_bundles() -> Result<Vec<model_bundle::ModelBundle>, String> {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ModelAssociation {
+    config_path: String,
+    root: String,
+    categories: std::collections::BTreeMap<String, Vec<String>>,
+    file_count: usize,
+}
+
+fn h3_model_category(path: &std::path::Path) -> Option<&'static str> {
+    let name = path.file_name()?.to_str()?.to_ascii_lowercase();
+    if !name.ends_with(".safetensors") {
+        return None;
+    }
+    if name.contains("qwen") || name.contains("text_encoder") {
+        Some("text_encoders")
+    } else if name.contains("vae") {
+        Some("vae")
+    } else if name.contains("minimax_h3") || name.contains("fl2va") || name.contains("ref2va") {
+        Some("diffusion_models")
+    } else {
+        None
+    }
+}
+
+#[tauri::command]
+fn associate_local_h3_models(root: String) -> Result<ModelAssociation, String> {
+    let scan = model_store::scan_model_directory(&root, Some(8))?;
+    let canonical_root =
+        std::fs::canonicalize(&scan.root).map_err(|e| format!("读取模型根目录失败：{e}"))?;
+    let mut categories =
+        std::collections::BTreeMap::<String, std::collections::BTreeSet<PathBuf>>::new();
+    let mut file_count = 0usize;
+    for model in &scan.models {
+        for file in &model.files {
+            let path = PathBuf::from(&file.path);
+            if let Some(category) = h3_model_category(&path) {
+                let parent = path
+                    .parent()
+                    .ok_or_else(|| "模型文件缺少父目录".to_string())?;
+                let canonical =
+                    std::fs::canonicalize(parent).map_err(|e| format!("读取模型目录失败：{e}"))?;
+                if !canonical.starts_with(&canonical_root) {
+                    return Err("模型文件超出所选根目录".into());
+                }
+                categories
+                    .entry(category.into())
+                    .or_default()
+                    .insert(canonical);
+                file_count += 1;
+            }
+        }
+    }
+    if !categories.contains_key("diffusion_models") {
+        return Err("没有找到 MiniMax-H3 diffusion model 权重".into());
+    }
+    let current = runtime_manager::RuntimeManager::new(runtime_root())
+        .current()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "请先安装托管 ComfyUI 运行环境".to_string())?;
+    let config_path = current.profile_dir.join("extra_model_paths.yaml");
+    let runtime_categories = categories
+        .iter()
+        .map(|(key, paths)| (key.clone(), paths.iter().cloned().collect::<Vec<_>>()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    runtime_manager::write_extra_model_paths(&config_path, &canonical_root, &runtime_categories)
+        .map_err(|e| e.to_string())?;
+    Ok(ModelAssociation {
+        config_path: config_path.to_string_lossy().into_owned(),
+        root: canonical_root.to_string_lossy().into_owned(),
+        categories: categories
+            .into_iter()
+            .map(|(key, paths)| {
+                (
+                    key,
+                    paths
+                        .into_iter()
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .collect(),
+                )
+            })
+            .collect(),
+        file_count,
+    })
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct InstalledModelBundle {
     id: String,
     model_root: String,
@@ -492,13 +578,21 @@ fn runtime_start(
     memory_profile: Option<runtime_manager::MemoryProfile>,
 ) -> Result<ManagedRuntimeStatus, String> {
     let manager = runtime_manager::RuntimeManager::new(runtime_root());
-    let plan = manager
+    let mut plan = manager
         .launch_plan_with_memory_profile(
             "ComfyUI_windows_portable\\python_embeded\\python.exe",
             "ComfyUI_windows_portable\\ComfyUI\\main.py",
             memory_profile.unwrap_or(runtime_manager::MemoryProfile::Auto),
         )
         .map_err(|e| e.to_string())?;
+    let extra_models = manager
+        .current()
+        .map_err(|e| e.to_string())?
+        .map(|current| current.profile_dir.join("extra_model_paths.yaml"));
+    if let Some(config) = extra_models.filter(|path| path.is_file()) {
+        plan.args.push("--extra-model-paths-config".into());
+        plan.args.push(config.to_string_lossy().into_owned());
+    }
     if !plan.program.is_file() {
         return Err("托管 Runtime 缺少 Python，可在运行环境页面执行修复".into());
     }
@@ -1002,7 +1096,7 @@ fn asset_type(path: &std::path::Path) -> Option<(&'static str, &'static str)> {
 
 #[cfg(test)]
 mod local_asset_tests {
-    use super::asset_type;
+    use super::{asset_type, h3_model_category};
     use std::path::Path;
 
     #[test]
@@ -1025,6 +1119,25 @@ mod local_asset_tests {
     fn rejects_unknown_or_missing_extensions() {
         assert_eq!(asset_type(Path::new("payload.exe")), None);
         assert_eq!(asset_type(Path::new("README")), None);
+    }
+
+    #[test]
+    fn classifies_official_h3_model_components() {
+        assert_eq!(
+            h3_model_category(Path::new(
+                "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+            )),
+            Some("diffusion_models")
+        );
+        assert_eq!(
+            h3_model_category(Path::new("qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors")),
+            Some("text_encoders")
+        );
+        assert_eq!(
+            h3_model_category(Path::new("minimax_h3_video_vae_fp16.safetensors")),
+            Some("vae")
+        );
+        assert_eq!(h3_model_category(Path::new("unrelated.safetensors")), None);
     }
 }
 
@@ -1279,6 +1392,7 @@ pub fn run() {
             compile_workflow,
             download_model_file,
             model_store::scan_local_models,
+            associate_local_h3_models,
             model_bundles,
             download_h3_bundle,
             runtime_get_current,

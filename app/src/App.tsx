@@ -56,6 +56,7 @@ function App() {
   const [modelScan, setModelScan] = useState<ModelScan | null>(null)
   const [modelError, setModelError] = useState('')
   const [scanningModels, setScanningModels] = useState(false)
+  const [modelLinkMessage, setModelLinkMessage] = useState('')
   const [jobMessage, setJobMessage] = useState('')
   const [historyDialog, setHistoryDialog] = useState(false)
   const [jobs, setJobs] = useState<JobRecord[]>([])
@@ -157,10 +158,16 @@ function App() {
   }
 
   const scanModels = async () => {
-    setScanningModels(true); setModelError(''); setModelScan(null)
+    setScanningModels(true); setModelError(''); setModelLinkMessage(''); setModelScan(null)
     try { setModelScan(await invoke<ModelScan>('scan_local_models', { root:modelPath, maxDepth:5 })) }
     catch (error) { setModelError(String(error)) }
     finally { setScanningModels(false) }
+  }
+
+  const associateModels = async () => {
+    setModelLinkMessage('正在生成托管 ComfyUI 模型路径映射…')
+    try{const value=await invoke<{configPath:string;fileCount:number;categories:Record<string,string[]>}>('associate_local_h3_models',{root:modelPath});setModelLinkMessage(`已关联 ${value.fileCount} 个 H3 组件 · ${Object.keys(value.categories).join('、')} · 重启托管环境后生效`)}
+    catch(error){setModelLinkMessage(String(error))}
   }
 
   const chooseAssets = async () => {
@@ -423,7 +430,8 @@ function App() {
           <label htmlFor="model-path">模型目录</label>
           <div className="url-row"><input id="model-path" value={modelPath} onChange={e=>setModelPath(e.target.value)} /><button onClick={chooseModelPath}>选择目录</button><button onClick={scanModels} disabled={scanningModels}>{scanningModels?'正在扫描…':'扫描'}</button></div>
           {modelError && <div className="probe-message error"><Info/><span><strong>扫描未完成</strong><small>{modelError}</small></span></div>}
-          {modelScan && <div className="model-results"><div className="result-head"><strong>发现 {modelScan.models.length} 个模型</strong><small>扫描深度 {modelScan.maxDepth} 层</small></div>{modelScan.models.length===0?<div className="empty-result">目录中没有识别到 H3 模型结构</div>:modelScan.models.map((item,i)=><article key={i}><div className="model-icon"><Boxes/></div><div><strong>{item.modelType}</strong><small>{item.directory}</small><span>{item.integrity} · {(item.totalSizeBytes/1024/1024/1024).toFixed(1)} GB · {item.files.length} 个组件</span></div><button>关联</button></article>)}</div>}
+          {modelScan && <div className="model-results"><div className="result-head"><strong>发现 {modelScan.models.length} 个模型</strong><small>扫描深度 {modelScan.maxDepth} 层</small></div>{modelScan.models.length===0?<div className="empty-result">目录中没有识别到 H3 模型结构</div>:modelScan.models.map((item,i)=><article key={i}><div className="model-icon"><Boxes/></div><div><strong>{item.modelType}</strong><small>{item.directory}</small><span>{item.integrity} · {(item.totalSizeBytes/1024/1024/1024).toFixed(1)} GB · {item.files.length} 个组件</span></div></article>)}<button className="associate-all" onClick={associateModels}>关联扫描到的模型目录</button></div>}
+          {modelLinkMessage&&<div className={`probe-message ${modelLinkMessage.includes('已关联')?'success':'error'}`}><ShieldCheck/><span><strong>{modelLinkMessage.includes('已关联')?'本地模型已关联':'模型关联状态'}</strong><small>{modelLinkMessage}</small></span></div>}
           <div className="modal-note"><ShieldCheck/><span><strong>保持原文件位置</strong><small>关联后通过模型路径映射复用权重，不会复制数十 GB 文件。</small></span></div>
         </section>
       </div>}
