@@ -88,3 +88,5 @@ Windows Setup 构建需从 Visual Studio x64 Developer Command Prompt 执行：`
 ## 事实边界
 
 MiniMax-H3 当前公开的 H3-Base 可进行本地 768p 音视频生成；官方 H3-Context-IR 与 H3-Regenerate-2K 未随初始开源版本发布，因此完整官方 2K 流程需要用户配置 MiniMax API。16–24GB 单卡方案依赖量化、卸载、分块和社区优化，具体组合必须通过真实硬件测试后再标记“已验证”。
+
+- [AutoDL ??????](docs/AUTODL_DEPLOYMENT.md)
