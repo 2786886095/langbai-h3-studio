@@ -37,6 +37,8 @@ Windows Setup 构建需从 Visual Studio x64 Developer Command Prompt 执行：`
 
 最新预览版为 `v0.6.1`：`release/v0.6.1/Langbai-H3-Studio_0.6.1_x64-setup.exe`。SHA-256：`F34FFA8A4E6F8171E9F8A2FAA9669B118F30C737C64C769AB12651E974AFA0AD`。该版本新增声明式加速插件管理、应用内更新和新手参数说明。
 
+兼容性记录版 `v0.6.2`：`release/v0.6.2/Langbai-H3-Studio_0.6.2_x64-setup.exe`。SHA-256：`4FA3CB2CE2E0A02076D985A2978FF3EAFDAF84F3A57F146687100B3C23529D65`。每次真实生成会在本机保存硬件、峰值资源、耗时、模型和插件组合报告，不会自动上传。
+
 ## 文档
 
 - [产品需求文档](docs/PRD.md)

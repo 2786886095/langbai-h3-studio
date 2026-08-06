@@ -9,6 +9,7 @@ use sysinfo::System;
 use tauri::Emitter;
 use url::Url;
 
+mod benchmark;
 mod comfy;
 mod comfy_transport;
 mod download;
@@ -28,6 +29,24 @@ fn runtime_root() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
     base.join("LangbaiH3Studio").join("runtime").join("comfy")
+}
+
+fn benchmark_root() -> PathBuf {
+    runtime_root()
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("benchmarks")
+}
+
+#[tauri::command]
+fn benchmark_save(report: benchmark::CompatibilityReport) -> Result<String, String> {
+    benchmark::save_report(&benchmark_root(), &report)
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn benchmark_list() -> Result<Vec<benchmark::CompatibilityReport>, String> {
+    benchmark::list_reports(&benchmark_root())
 }
 
 const RUNTIME_NVIDIA_MANIFEST: &str =
@@ -1251,6 +1270,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             probe_system,
+            benchmark_save,
+            benchmark_list,
             probe_comfyui,
             validate_output_path,
             compile_workflow,
