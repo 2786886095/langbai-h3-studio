@@ -30,6 +30,7 @@ type PluginLock = { plugins:Record<string,{version:string;enabled:boolean;sha256
 type PluginInspection = { package:{manifest:{id:string;name:string;version:string;provides:string[];license?:string};packageSha256:string;files:string[]};compatibility:{compatible:boolean;missingNodes:string[];conflicts:string[];provides:string[];reasons:string[]} }
 type BenchmarkState = {startedAt:number;mode:string;width:number;height:number;duration:number;steps:number;modelFile:string;gpuName:string;driverVersion:string;vramTotal:number;peakVram:number;ramTotal:number;peakRam:number}
 type BenchmarkReport = {reportId:string;createdAt:number;gpuName:string;vramTotalMb:number;peakVramUsedMb:number;peakRamUsedMb:number;generationMode:string;width:number;height:number;durationSeconds:number;elapsedSeconds:number;outcome:string;enabledPlugins:string[]}
+type ManagedRuntimeStatus = {running:boolean;pid?:number;endpoint?:string;startedAt?:number;exitCode?:number}
 
 const modeContent = {
   text: { title: '文字生成视频', desc: '只需描述画面、镜头和声音，适合从零开始创作。' },
@@ -94,10 +95,13 @@ function App() {
   const [helpDialog, setHelpDialog] = useState(false)
   const benchmarkRef = useRef<BenchmarkState | null>(null)
   const [benchmarkReports, setBenchmarkReports] = useState<BenchmarkReport[]>([])
+  const [memoryProfile, setMemoryProfile] = useState<'auto'|'conservative'|'minimum'>('auto')
+  const [managedStatus, setManagedStatus] = useState<ManagedRuntimeStatus | null>(null)
+  const [managedMessage, setManagedMessage] = useState('')
   const estimate = useMemo(() => duration <= 6 ? '约 8–12 分钟' : duration <= 10 ? '约 14–20 分钟' : '约 22–30 分钟', [duration])
 
   useEffect(() => {
-    invoke<SystemProbe>('probe_system').then(setSystem).catch(() => {})
+    invoke<SystemProbe>('probe_system').then(value=>{setSystem(value);if(value.gpu&&value.gpu.memoryTotalMb<16000)setMemoryProfile('conservative')}).catch(() => {})
     invoke<RuntimeManifest[]>('runtime_manifests').then(setRuntimeManifests).catch(()=>{})
     invoke<ModelBundle[]>('model_bundles').then(setModelBundles).catch(()=>{})
     invoke<H3PatchManifest>('h3_preview_patch_manifest').then(setH3Patch).catch(()=>{})
@@ -234,6 +238,17 @@ function App() {
       setH3PatchMessage('H3 预览补丁与 Python 依赖已安装；请重启托管 Runtime 后重新检测。')
     } catch(error) { setH3PatchMessage(String(error)) }
     finally { setInstallingH3Patch(false) }
+  }
+
+  const startManagedRuntime = async () => {
+    setManagedMessage('正在启动托管 ComfyUI…')
+    try{const value=await invoke<ManagedRuntimeStatus>('runtime_start',{memoryProfile});setManagedStatus(value);if(value.endpoint){setComfyUrl(value.endpoint);setManagedMessage(`托管 ComfyUI 已启动 · ${value.endpoint}`)}}
+    catch(error){setManagedMessage(String(error))}
+  }
+
+  const stopManagedRuntime = async () => {
+    try{const value=await invoke<ManagedRuntimeStatus>('runtime_stop');setManagedStatus(value);setManagedMessage('托管 ComfyUI 已停止')}
+    catch(error){setManagedMessage(String(error))}
   }
 
   const checkUpdate = async () => {
@@ -379,6 +394,10 @@ function App() {
           <div className="runtime-options">{runtimeManifests.map((item,index)=><article key={item.version}><div className="model-icon"><Cpu/></div><div><strong>{index===0?'NVIDIA 新版运行环境':'NVIDIA 兼容运行环境'}</strong><small>{item.version} · 官方 ComfyUI v0.30.0 · 约 {index===0?'2.11':'2.05'} GB</small><span>{index===0?'适合 RTX 20 系及更新显卡':'CUDA 12.6，适合旧驱动或较老显卡'}</span></div><button onClick={()=>installRuntime(index===0?'nvidia':'nvidia-cu126')} disabled={!!installingRuntime}>{installingRuntime=== (index===0?'nvidia':'nvidia-cu126')?'安装中…':'下载并安装'}</button></article>)}</div>
           {runtimeProgress && <div className="runtime-progress"><div><span>{runtimeProgress.phase}</span><strong>{Math.round(runtimeProgress.progressPercent || 0)}%</strong></div><div className="progress"><span style={{width:`${runtimeProgress.progressPercent || 0}%`}}/></div><small>{runtimeProgress.bytesPerSecond?`${(runtimeProgress.bytesPerSecond/1024/1024).toFixed(1)} MB/s`:runtimeProgress.currentFile||'正在准备'} {runtimeProgress.etaSeconds?`· 剩余约 ${Math.ceil(runtimeProgress.etaSeconds/60)} 分钟`:''}</small></div>}
           {runtimeMessage && <div className={`probe-message ${runtimeMessage.includes('已安装')?'success':'error'}`}><ShieldCheck/><span><strong>{runtimeMessage}</strong><small>下载支持断点续传，安装前会验证官方 SHA-256。</small></span></div>}
+          <div className="section-divider"><span>托管环境启动策略</span></div>
+          <div className="memory-profiles">{([{id:'auto',name:'自动动态显存',desc:'推荐 16–24GB；使用 ComfyUI 默认动态卸载'},{id:'conservative',name:'保守低显存',desc:'推荐 12–16GB 实验使用；启用 lowvram 并预留 1.5GB'},{id:'minimum',name:'最小显存',desc:'极慢兜底；大部分权重放在内存'}] as const).map(item=><button key={item.id} className={memoryProfile===item.id?'selected':''} onClick={()=>setMemoryProfile(item.id)}><strong>{item.name}</strong><small>{item.desc}</small></button>)}</div>
+          <div className="runtime-actions"><button onClick={startManagedRuntime} disabled={managedStatus?.running}>启动托管环境</button><button onClick={stopManagedRuntime} disabled={!managedStatus?.running}>停止</button></div>
+          {managedMessage&&<div className={`probe-message ${managedMessage.includes('已启动')||managedMessage.includes('已停止')?'success':'error'}`}><Cpu/><span><strong>{managedMessage}</strong><small>{managedStatus?.pid?`进程 PID ${managedStatus.pid}`:'启动参数只由内置显存档位生成'}</small></span></div>}
           <div className="section-divider"><span>或连接已有环境</span></div>
           <p>输入本机 ComfyUI 地址。探测只读取版本和节点能力，不修改现有环境。</p>
           <label htmlFor="comfy-url">ComfyUI 地址</label>

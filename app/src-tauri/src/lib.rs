@@ -489,12 +489,14 @@ struct ManagedRuntimeStatus {
 #[tauri::command]
 fn runtime_start(
     state: tauri::State<'_, ManagedRuntimeState>,
+    memory_profile: Option<runtime_manager::MemoryProfile>,
 ) -> Result<ManagedRuntimeStatus, String> {
     let manager = runtime_manager::RuntimeManager::new(runtime_root());
     let plan = manager
-        .launch_plan(
+        .launch_plan_with_memory_profile(
             "ComfyUI_windows_portable\\python_embeded\\python.exe",
             "ComfyUI_windows_portable\\ComfyUI\\main.py",
+            memory_profile.unwrap_or(runtime_manager::MemoryProfile::Auto),
         )
         .map_err(|e| e.to_string())?;
     if !plan.program.is_file() {

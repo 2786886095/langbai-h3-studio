@@ -84,6 +84,24 @@ pub struct LaunchPlan {
     pub environment: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryProfile {
+    Auto,
+    Conservative,
+    Minimum,
+}
+
+impl MemoryProfile {
+    fn args(self) -> &'static [&'static str] {
+        match self {
+            Self::Auto => &[],
+            Self::Conservative => &["--lowvram", "--reserve-vram", "1.5"],
+            Self::Minimum => &["--novram", "--reserve-vram", "1.5"],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StopPlan {
     pub pid: u32,
@@ -214,21 +232,32 @@ impl RuntimeManager {
         python_relative: impl AsRef<Path>,
         main_relative: impl AsRef<Path>,
     ) -> Result<LaunchPlan, RuntimeError> {
+        self.launch_plan_with_memory_profile(python_relative, main_relative, MemoryProfile::Auto)
+    }
+
+    pub fn launch_plan_with_memory_profile(
+        &self,
+        python_relative: impl AsRef<Path>,
+        main_relative: impl AsRef<Path>,
+        memory_profile: MemoryProfile,
+    ) -> Result<LaunchPlan, RuntimeError> {
         let current = self.current()?.ok_or(RuntimeError::NoCurrentRuntime)?;
         let program = safe_child(&current.profile_dir, python_relative.as_ref())?;
         let main = safe_child(&current.profile_dir, main_relative.as_ref())?;
         let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))?;
         let port = listener.local_addr()?.port();
         drop(listener);
+        let mut args = vec![
+            main.to_string_lossy().into_owned(),
+            "--listen".into(),
+            LOOPBACK.into(),
+            "--port".into(),
+            port.to_string(),
+        ];
+        args.extend(memory_profile.args().iter().map(|value| (*value).into()));
         Ok(LaunchPlan {
             program,
-            args: vec![
-                main.to_string_lossy().into_owned(),
-                "--listen".into(),
-                LOOPBACK.into(),
-                "--port".into(),
-                port.to_string(),
-            ],
+            args,
             working_dir: current.profile_dir,
             endpoint: format!("http://{LOOPBACK}:{port}"),
             port,

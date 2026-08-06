@@ -56,6 +56,37 @@ fn launch_is_loopback_only_and_rejects_escape() {
 }
 
 #[test]
+fn memory_profiles_emit_only_known_comfy_arguments() {
+    let root = temp_root("memory-profile");
+    let manager = RuntimeManager::new(&root);
+    manager.prepare_staging("v1").unwrap();
+    manager.activate_staged("v1").unwrap();
+    let conservative = manager
+        .launch_plan_with_memory_profile(
+            "python/python.exe",
+            "ComfyUI/main.py",
+            MemoryProfile::Conservative,
+        )
+        .unwrap();
+    assert!(
+        conservative
+            .args
+            .windows(2)
+            .any(|v| v == ["--reserve-vram", "1.5"])
+    );
+    assert!(conservative.args.contains(&"--lowvram".into()));
+    let minimum = manager
+        .launch_plan_with_memory_profile(
+            "python/python.exe",
+            "ComfyUI/main.py",
+            MemoryProfile::Minimum,
+        )
+        .unwrap();
+    assert!(minimum.args.contains(&"--novram".into()));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn model_yaml_and_lifecycle_plans_are_stable() {
     let mut models = BTreeMap::new();
     models.insert(
