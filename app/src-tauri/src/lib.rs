@@ -1567,6 +1567,7 @@ pub fn run() {
             ssh_tunnel::ssh_tunnel_status,
             ssh_tunnel::ssh_tunnel_stop,
             autodl_remote::autodl_remote_probe,
+            autodl_remote::autodl_remote_sample,
             autodl_deploy::autodl_deploy_preflight,
             autodl_deploy::autodl_deploy_prepare,
             autodl_deploy::autodl_deploy_status,

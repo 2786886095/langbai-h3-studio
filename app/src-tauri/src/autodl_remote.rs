@@ -102,6 +102,18 @@ done
 rec done "ok"
 '"#;
 
+/// Fixed read-only resource sample used while a remote H3 job is running.
+const REMOTE_SAMPLE_COMMAND: &str = r#"sh -c '
+set -- $(nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null | awk -F, "{ gsub(/ /,\"\",\$1); gsub(/ /,\"\",\$2); used+=\$1; total+=\$2 } END { printf \"%d %d\", used, total }")
+gpu_used="${1:-0}"; gpu_total="${2:-0}"
+ram_total_kib="$(awk "/^MemTotal:/ { print \$2 }" /proc/meminfo 2>/dev/null)"
+ram_available_kib="$(awk "/^MemAvailable:/ { print \$2 }" /proc/meminfo 2>/dev/null)"
+ram_total_mib="$(( ${ram_total_kib:-0} / 1024 ))"
+ram_available_mib="$(( ${ram_available_kib:-0} / 1024 ))"
+ram_used_mib="$(( ram_total_mib - ram_available_mib ))"
+printf "sample\t%s\t%s\t%s\t%s\n" "$gpu_used" "$gpu_total" "$ram_used_mib" "$ram_total_mib"
+'"#;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SshProbeLaunchPlan {
     pub program: PathBuf,
@@ -126,6 +138,15 @@ pub struct RemoteGpu {
     pub name: String,
     pub vram_mib: Option<u64>,
     pub driver_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteResourceSample {
+    pub gpu_used_mib: u64,
+    pub gpu_total_mib: u64,
+    pub ram_used_mib: u64,
+    pub ram_total_mib: u64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -199,6 +220,14 @@ pub fn build_probe_launch_plan(
     config: &SshTunnelConfig,
     program: PathBuf,
 ) -> Result<SshProbeLaunchPlan, String> {
+    build_read_only_launch_plan(config, program, REMOTE_PROBE_COMMAND)
+}
+
+fn build_read_only_launch_plan(
+    config: &SshTunnelConfig,
+    program: PathBuf,
+    remote_command: &str,
+) -> Result<SshProbeLaunchPlan, String> {
     validate_atom(&config.host, "SSH\u{4e3b}\u{673a}", true)?;
     validate_atom(&config.user, "SSH\u{7528}\u{6237}\u{540d}", false)?;
     if config.port == 0 {
@@ -260,9 +289,16 @@ pub fn build_probe_launch_plan(
             "-o".into(),
             "PermitLocalCommand=no".into(),
             destination,
-            REMOTE_PROBE_COMMAND.into(),
+            remote_command.into(),
         ],
     })
+}
+
+pub fn build_sample_launch_plan(
+    config: &SshTunnelConfig,
+    program: PathBuf,
+) -> Result<SshProbeLaunchPlan, String> {
+    build_read_only_launch_plan(config, program, REMOTE_SAMPLE_COMMAND)
 }
 
 fn read_limited(mut reader: impl Read + Send + 'static) -> mpsc::Receiver<Vec<u8>> {
@@ -620,6 +656,38 @@ pub async fn autodl_remote_probe(config: SshTunnelConfig) -> Result<AutoDlRemote
     parse_probe_output(&raw)
 }
 
+pub fn parse_resource_sample(bytes: &[u8]) -> Result<RemoteResourceSample, String> {
+    if bytes.len() > 256 || bytes.contains(&0) {
+        return Err("远端资源采样返回格式无效".into());
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| "远端资源采样不是 UTF-8")?;
+    let fields: Vec<_> = text.trim().split('\t').collect();
+    if fields.len() != 5 || fields[0] != "sample" {
+        return Err("远端资源采样字段不完整".into());
+    }
+    let number = |value: &str| value.parse::<u64>().map_err(|_| "远端资源采样数值无效".to_string());
+    let sample = RemoteResourceSample {
+        gpu_used_mib: number(fields[1])?,
+        gpu_total_mib: number(fields[2])?,
+        ram_used_mib: number(fields[3])?,
+        ram_total_mib: number(fields[4])?,
+    };
+    if sample.gpu_used_mib > sample.gpu_total_mib || sample.ram_used_mib > sample.ram_total_mib {
+        return Err("远端资源采样峰值超过总量".into());
+    }
+    Ok(sample)
+}
+
+#[tauri::command]
+pub async fn autodl_remote_sample(config: SshTunnelConfig) -> Result<RemoteResourceSample, String> {
+    let ssh = ssh_tunnel::system_ssh_path()?;
+    let plan = build_sample_launch_plan(&config, ssh)?;
+    let raw = tokio::task::spawn_blocking(move || run_probe(plan))
+        .await
+        .map_err(|_| "远端资源采样任务异常结束")??;
+    parse_resource_sample(&raw)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -742,5 +810,17 @@ mod tests {
             encoded("ok")
         );
         assert!(parse_probe_output(unsafe_source.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn sample_plan_is_fixed_and_parser_rejects_impossible_usage() {
+        let dir = tempdir().unwrap();
+        let plan = build_sample_launch_plan(&sample_config(dir.path()), PathBuf::from("ssh.exe")).unwrap();
+        assert_eq!(plan.args.last().unwrap(), REMOTE_SAMPLE_COMMAND);
+        assert!(!REMOTE_SAMPLE_COMMAND.contains("gpu.autodl.example"));
+        let parsed = parse_resource_sample(b"sample\t2048\t32768\t4096\t65536\n").unwrap();
+        assert_eq!(parsed.gpu_used_mib, 2048);
+        assert!(parse_resource_sample(b"sample\t40000\t32768\t1\t2\n").is_err());
+        assert!(parse_resource_sample(b"sample\t1\t2\n").is_err());
     }
 }

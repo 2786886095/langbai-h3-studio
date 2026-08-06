@@ -41,6 +41,7 @@ type ManagedNodeItem = {id:string;name:string;repository:string;commit:string;li
 type ManagedNodeState = {id:string;installed:boolean;installedCommit?:string;restartRequired:boolean;verified:boolean;category:string;evidenceLevel:string}
 type SshTunnelStatus = {running:boolean;pid?:number;endpoint?:string;localPort?:number;startedAt?:number;exitCode?:number;phase:'starting'|'ready'|'stopped'|'failed';errorCode?:string;error?:string}
 type AutoDlProbe = {os:string;gpus:Array<{name:string;vramMib?:number;driverVersion?:string}>;totalVramMib:number;ramTotalMib?:number;python?:string;disks:Array<{availableBytes?:number;mountPoint:string}>;comfyuiCandidates:Array<{path:string;h3SourceFiles:Array<{relativePath:string;present:boolean}>;modelVariants:Array<{id:string;files:Array<{relativePath:string;expectedSizeBytes:number;present:boolean;sizeBytes:number}>}>;kjH3SageAttentionPresent:boolean}>}
+type RemoteResourceSample = {gpuUsedMib:number;gpuTotalMib:number;ramUsedMib:number;ramTotalMib:number}
 type AutoDlDeployPlan = {deploymentId:string;targetPath:string;remoteComfyPort:number;requiredBytes:number;availableBytes:number;downloadFiles:Array<{relativePath:string;size:number;sha256:string;url:string}>;rollbackSupported:boolean;warnings:string[]}
 type AutoDlDeployProgress = {sequence:number;stage:string;message:string}
 type AutoDlDeployPrepareResult = {plan:AutoDlDeployPlan;progress:AutoDlDeployProgress[];scriptSha256:string}
@@ -213,6 +214,8 @@ function App() {
     let stopped=false
     const poll=async()=>{
       try{
+        const remoteSample=benchmarkRef.current?.executionTarget==='remote_autodl'?await invoke<RemoteResourceSample>('autodl_remote_sample',{config:{host:sshHost,user:sshUser,port:sshPort,identityFile:sshIdentity,knownHostsFile:sshKnownHosts,remoteComfyPort:sshRemotePort}}).catch(()=>null):null
+        if(remoteSample&&benchmarkRef.current){benchmarkRef.current.resourceSamplingSeconds=3;benchmarkRef.current.peakVram=Math.max(benchmarkRef.current.peakVram,remoteSample.gpuUsedMib);benchmarkRef.current.vramTotal=remoteSample.gpuTotalMib;benchmarkRef.current.peakRam=Math.max(benchmarkRef.current.peakRam,remoteSample.ramUsedMib);benchmarkRef.current.ramTotal=remoteSample.ramTotalMib}
         const hardware=benchmarkRef.current?.executionTarget==='remote_autodl'?null:await invoke<SystemProbe>('probe_system').catch(()=>null)
         if(hardware&&benchmarkRef.current){benchmarkRef.current.peakRam=Math.max(benchmarkRef.current.peakRam,hardware.memoryUsedMb);if(hardware.gpu){benchmarkRef.current.peakVram=Math.max(benchmarkRef.current.peakVram,hardware.gpu.memoryUsedMb);benchmarkRef.current.gpuName=hardware.gpu.name;benchmarkRef.current.driverVersion=hardware.gpu.driverVersion;benchmarkRef.current.vramTotal=hardware.gpu.memoryTotalMb}}
         const value=await invoke<GenerationPoll>('comfy_poll_generation',{baseUrl:comfyUrl,promptId:activePromptId})
@@ -225,22 +228,24 @@ function App() {
             saved.push(await invoke<string>('comfy_save_output',{baseUrl:comfyUrl,asset,outputDirectory:outputPath}))
           }
           const sample=benchmarkRef.current
-          if(sample)await invoke('benchmark_save',{report:{schemaVersion:1,reportId:value.promptId,createdAt:Math.floor(Date.now()/1000),studioVersion:'0.11.0',executionTarget:sample.executionTarget,resourceSamplingSeconds:sample.resourceSamplingSeconds,gpuName:sample.gpuName||'未检测到',driverVersion:sample.driverVersion,vramTotalMb:sample.vramTotal,peakVramUsedMb:sample.peakVram,ramTotalMb:sample.ramTotal,peakRamUsedMb:sample.peakRam,runtimeVersion:comfyUrl,h3PatchCommit:h3Patch?.commit||'',generationMode:sample.mode,width:sample.width,height:sample.height,durationSeconds:sample.duration,steps:sample.steps,modelFile:sample.modelFile,enabledPlugins:Object.entries(pluginLock.plugins).filter(([,item])=>item.enabled).map(([id])=>id),elapsedSeconds:(Date.now()-sample.startedAt)/1000,outcome:'completed',errorSummary:'',outputFile:saved[0]||''}}).catch(()=>{})
+          if(sample)await invoke('benchmark_save',{report:{schemaVersion:1,reportId:value.promptId,createdAt:Math.floor(Date.now()/1000),studioVersion:'0.11.1',executionTarget:sample.executionTarget,resourceSamplingSeconds:sample.resourceSamplingSeconds,gpuName:sample.gpuName||'未检测到',driverVersion:sample.driverVersion,vramTotalMb:sample.vramTotal,peakVramUsedMb:sample.peakVram,ramTotalMb:sample.ramTotal,peakRamUsedMb:sample.peakRam,runtimeVersion:comfyUrl,h3PatchCommit:h3Patch?.commit||'',generationMode:sample.mode,width:sample.width,height:sample.height,durationSeconds:sample.duration,steps:sample.steps,modelFile:sample.modelFile,enabledPlugins:Object.entries(pluginLock.plugins).filter(([,item])=>item.enabled).map(([id])=>id),elapsedSeconds:(Date.now()-sample.startedAt)/1000,outcome:'completed',errorSummary:'',outputFile:saved[0]||''}}).catch(()=>{})
           benchmarkRef.current=null
           if(activeJobId)await invoke('update_job',{patch:{id:activeJobId,status:'completed',stage:'已完成',progress:1,planJson:null,outputPath:saved[0]||null,errorSummary:null}}).catch(()=>{})
           setJobMessage(saved.length?`生成完成，已保存到 ${saved.join('、')}`:'生成完成，但历史记录中没有视频输出')
           setActivePromptId('');setActiveJobId('');setGenerating(false)
         }else if(value.status==='failed'){
           const sample=benchmarkRef.current
-          if(sample)await invoke('benchmark_save',{report:{schemaVersion:1,reportId:value.promptId,createdAt:Math.floor(Date.now()/1000),studioVersion:'0.11.0',executionTarget:sample.executionTarget,resourceSamplingSeconds:sample.resourceSamplingSeconds,gpuName:sample.gpuName||'未检测到',driverVersion:sample.driverVersion,vramTotalMb:sample.vramTotal,peakVramUsedMb:sample.peakVram,ramTotalMb:sample.ramTotal,peakRamUsedMb:sample.peakRam,runtimeVersion:comfyUrl,h3PatchCommit:h3Patch?.commit||'',generationMode:sample.mode,width:sample.width,height:sample.height,durationSeconds:sample.duration,steps:sample.steps,modelFile:sample.modelFile,enabledPlugins:Object.entries(pluginLock.plugins).filter(([,item])=>item.enabled).map(([id])=>id),elapsedSeconds:(Date.now()-sample.startedAt)/1000,outcome:'failed',errorSummary:value.error||'ComfyUI 执行失败',outputFile:''}}).catch(()=>{})
+          if(sample)await invoke('benchmark_save',{report:{schemaVersion:1,reportId:value.promptId,createdAt:Math.floor(Date.now()/1000),studioVersion:'0.11.1',executionTarget:sample.executionTarget,resourceSamplingSeconds:sample.resourceSamplingSeconds,gpuName:sample.gpuName||'未检测到',driverVersion:sample.driverVersion,vramTotalMb:sample.vramTotal,peakVramUsedMb:sample.peakVram,ramTotalMb:sample.ramTotal,peakRamUsedMb:sample.peakRam,runtimeVersion:comfyUrl,h3PatchCommit:h3Patch?.commit||'',generationMode:sample.mode,width:sample.width,height:sample.height,durationSeconds:sample.duration,steps:sample.steps,modelFile:sample.modelFile,enabledPlugins:Object.entries(pluginLock.plugins).filter(([,item])=>item.enabled).map(([id])=>id),elapsedSeconds:(Date.now()-sample.startedAt)/1000,outcome:'failed',errorSummary:value.error||'ComfyUI 执行失败',outputFile:''}}).catch(()=>{})
           if(activeJobId)await invoke('update_job',{patch:{id:activeJobId,status:'failed',stage:'生成失败',progress:1,planJson:null,outputPath:null,errorSummary:value.error||'ComfyUI 执行失败'}}).catch(()=>{})
           benchmarkRef.current=null;setActivePromptId('');setActiveJobId('');setGenerating(false)
         }
       }catch(error){if(!stopped)setJobMessage(`读取生成状态失败：${String(error)}`)}
     }
-    poll();const timer=setInterval(poll,3000)
-    return()=>{stopped=true;clearInterval(timer)}
-  },[activePromptId,activeJobId,comfyUrl,outputPath,h3Patch?.commit,pluginLock.plugins])
+    let timer:number|undefined
+    const loop=async()=>{await poll();if(!stopped)timer=window.setTimeout(loop,3000)}
+    loop()
+    return()=>{stopped=true;if(timer!==undefined)window.clearTimeout(timer)}
+  },[activePromptId,activeJobId,comfyUrl,outputPath,h3Patch?.commit,pluginLock.plugins,sshHost,sshUser,sshPort,sshIdentity,sshKnownHosts,sshRemotePort])
   useEffect(()=>{
     if(engine!=='cloud'||!cloudTask||['completed','failed'].includes(cloudTask.status))return
     let stopped=false
@@ -811,7 +816,7 @@ function App() {
           <div className="url-row"><input id="output-path" value={outputPath} onChange={e=>{setOutputPath(e.target.value);setPathMessage('')}} /><button onClick={chooseOutputPath}>选择目录</button><button onClick={validatePath}>验证</button></div>
           {pathMessage && <div className={`probe-message ${pathMessage.includes('可写')?'success':'error'}`}><ShieldCheck/><span><strong>{pathMessage}</strong><small>后续任务可单独覆盖此目录。</small></span></div>}
           <div className="section-divider"><span>软件更新</span></div>
-          <div className="update-row"><div><strong>GitHub Releases</strong><small>当前 v0.11.0 · 包含预览版本 · 下载支持断点续传和 SHA-256 校验</small></div><button onClick={checkUpdate} disabled={checkingUpdate}>{checkingUpdate?'检查中…':'检查更新'}</button></div>
+          <div className="update-row"><div><strong>GitHub Releases</strong><small>当前 v0.11.1 · 包含预览版本 · 下载支持断点续传和 SHA-256 校验</small></div><button onClick={checkUpdate} disabled={checkingUpdate}>{checkingUpdate?'检查中…':'检查更新'}</button></div>
           {updateCandidate&&!downloadedUpdate&&<div className="update-candidate"><span><strong>{updateCandidate.version}</strong><small>{updateCandidate.fileName}</small></span><button onClick={downloadUpdate}>下载更新</button></div>}
           {updateProgress&&!downloadedUpdate&&<div className="runtime-progress"><div><span>更新下载</span><strong>{Math.round(updateProgress.progressPercent||0)}%</strong></div><div className="progress"><span style={{width:`${updateProgress.progressPercent||0}%`}}/></div><small>{updateProgress.bytesPerSecond?`${(updateProgress.bytesPerSecond/1024/1024).toFixed(1)} MB/s`:'正在准备'} {updateProgress.etaSeconds?`· 剩余约 ${Math.ceil(updateProgress.etaSeconds/60)} 分钟`:''}</small></div>}
           {downloadedUpdate&&<button className="primary wide update-install" onClick={launchUpdate}>关闭软件并安装 {downloadedUpdate.version}</button>}

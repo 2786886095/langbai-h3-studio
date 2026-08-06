@@ -21,9 +21,9 @@
 
 ## 下载
 
-Windows x64 Preview：[`Langbai-H3-Studio_0.11.0_x64-setup.exe`](release/v0.11.0/Langbai-H3-Studio_0.11.0_x64-setup.exe)
+Windows x64 Preview：[`Langbai-H3-Studio_0.11.0_x64-setup.exe`](release/v0.11.1/Langbai-H3-Studio_0.11.1_x64-setup.exe)
 
-SHA-256：`2BFFB13696ECDBE4BA097CC275848AC9D037C6FAECFA61CF41D30FB7CB2280FD`
+SHA-256：`18FAB1B46AFCD74B7C63DC55CF7D2A57374DB0A2628BD9A5BD02508D070DA517`
 
 安装包目前没有商业代码签名，Windows 可能显示“未知发布者”。请核对 GitHub Release 与仓库公布的 SHA-256。
 
