@@ -5,9 +5,82 @@ use tauri::Emitter;
 use url::Url;
 
 mod comfy;
+mod comfy_transport;
 mod download;
 mod job_store;
 mod model_store;
+mod runtime_manager;
+
+fn runtime_root() -> PathBuf {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    base.join("LangbaiH3Studio").join("runtime").join("comfy")
+}
+
+#[tauri::command]
+fn runtime_get_current() -> Result<Option<runtime_manager::CurrentRuntime>, String> {
+    runtime_manager::RuntimeManager::new(runtime_root())
+        .current()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn runtime_prepare_staging(version: String) -> Result<String, String> {
+    runtime_manager::RuntimeManager::new(runtime_root())
+        .prepare_staging(&version)
+        .map(|path| path.to_string_lossy().into_owned())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn runtime_activate_staged(version: String) -> Result<runtime_manager::CurrentRuntime, String> {
+    runtime_manager::RuntimeManager::new(runtime_root())
+        .activate_staged(&version)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn runtime_launch_plan() -> Result<runtime_manager::LaunchPlan, String> {
+    runtime_manager::RuntimeManager::new(runtime_root())
+        .launch_plan("python\\python.exe", "ComfyUI\\main.py")
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn comfy_submit_prompt(
+    base_url: String,
+    workflow: serde_json::Value,
+    client_id: String,
+) -> Result<comfy_transport::PromptReceipt, String> {
+    comfy_transport::ComfyTransport::new(&base_url, Duration::from_secs(30))?
+        .post_prompt(workflow, &client_id)
+        .await
+}
+
+#[tauri::command]
+async fn comfy_get_queue(base_url: String) -> Result<serde_json::Value, String> {
+    comfy_transport::ComfyTransport::new(&base_url, Duration::from_secs(15))?
+        .get_queue()
+        .await
+}
+
+#[tauri::command]
+async fn comfy_get_history(
+    base_url: String,
+    prompt_id: String,
+) -> Result<serde_json::Value, String> {
+    comfy_transport::ComfyTransport::new(&base_url, Duration::from_secs(15))?
+        .get_history(&prompt_id)
+        .await
+}
+
+#[tauri::command]
+async fn comfy_interrupt(base_url: String) -> Result<(), String> {
+    comfy_transport::ComfyTransport::new(&base_url, Duration::from_secs(15))?
+        .interrupt()
+        .await
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -214,6 +287,14 @@ pub fn run() {
             compile_workflow,
             download_model_file,
             model_store::scan_local_models,
+            runtime_get_current,
+            runtime_prepare_staging,
+            runtime_activate_staged,
+            runtime_launch_plan,
+            comfy_submit_prompt,
+            comfy_get_queue,
+            comfy_get_history,
+            comfy_interrupt,
             job_store::create_job,
             job_store::list_jobs,
             job_store::update_job

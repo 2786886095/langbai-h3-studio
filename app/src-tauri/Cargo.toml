@@ -1,6 +1,6 @@
 [package]
 name = "langbai-h3-studio"
-version = "0.2.0"
+version = "0.3.0"
 description = "Langbai H3 Studio"
 authors = ["Langbai H3 Studio contributors"]
 license = "Apache-2.0"
@@ -18,7 +18,7 @@ tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sysinfo = "0.37"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
 url = "2"
 rusqlite = { version = "0.37", features = ["bundled"] }
 rand = "0.10"

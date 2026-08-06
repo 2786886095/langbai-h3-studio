@@ -1,5 +1,25 @@
 # 更新记录
 
+## 0.3.0 - 2026-08-06
+
+### 新增
+
+- 托管 ComfyUI 版本化 staging/versions Runtime Profile
+- `current.json` 事务切换、失败恢复和上一版本保留
+- 仅绑定 127.0.0.1 随机端口的启动计划
+- `extra_model_paths.yaml` 安全生成
+- 真实 ComfyUI `/prompt`、`/queue`、`/history`、`/interrupt` HTTP 传输层
+- multipart 输入素材上传核心
+- IPv4/IPv6 回环地址保护及中文网络错误
+- 生成记录 SQLite 列表界面
+- 输出路径创建与写权限验证界面
+
+### 验证
+
+- Rust 单元与集成测试共 24 项通过
+- 本地 mock ComfyUI 覆盖提交、队列、历史、中断、上传、HTTP 失败和超时
+- TypeScript/Vite 生产构建通过
+
 ## 0.2.0 - 2026-08-06
 
 ### 新增

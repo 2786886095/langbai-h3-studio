@@ -12,6 +12,7 @@ type Mode = 'text' | 'frames' | 'reference'
 type SystemProbe = { cpuName:string; cpuThreads:number; memoryTotalMb:number; memoryUsedMb:number; cudaAvailable:boolean; gpu?:{name:string;driverVersion:string;memoryTotalMb:number;memoryUsedMb:number;temperatureC?:number} }
 type ComfyProbe = { reachable:boolean; baseUrl:string; nodeCount:number; h3RelatedNodes:string[]; latencyMs:number; message:string }
 type ModelScan = { root:string; maxDepth:number; models:Array<{directory:string;modelType:string;integrity:string;totalSizeBytes:number;files:Array<{path:string;sizeBytes:number;kind:string}>;warnings:string[]}>; warnings:string[] }
+type JobRecord = { id:string;name:string;status:string;stage:string;progress:number;backendId:string;outputPath?:string;errorSummary?:string;createdAt:number;updatedAt:number }
 
 const modeContent = {
   text: { title: '文字生成视频', desc: '只需描述画面、镜头和声音，适合从零开始创作。' },
@@ -40,6 +41,12 @@ function App() {
   const [modelError, setModelError] = useState('')
   const [scanningModels, setScanningModels] = useState(false)
   const [jobMessage, setJobMessage] = useState('')
+  const [historyDialog, setHistoryDialog] = useState(false)
+  const [jobs, setJobs] = useState<JobRecord[]>([])
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const [settingsDialog, setSettingsDialog] = useState(false)
+  const [outputPath, setOutputPath] = useState('D:\\H3作品')
+  const [pathMessage, setPathMessage] = useState('')
   const estimate = useMemo(() => duration <= 6 ? '约 8–12 分钟' : duration <= 10 ? '约 14–20 分钟' : '约 22–30 分钟', [duration])
 
   useEffect(() => { invoke<SystemProbe>('probe_system').then(setSystem).catch(() => {}) }, [])
@@ -62,12 +69,25 @@ function App() {
 
   const createGenerationJob = async () => {
     setGenerating(true); setJobMessage('')
-    const request = { mode, prompt, duration, width:1360, height:768, fps:24, quality:'standard', outputDirectory:'D:\\H3作品' }
+    const request = { mode, prompt, duration, width:1360, height:768, fps:24, quality:'standard', outputDirectory:outputPath }
     try {
       const job = await invoke<{id:string}>('create_job', { input:{ name:`${modeContent[mode].title} · ${new Date().toLocaleTimeString()}`, requestJson:JSON.stringify(request), backendId:'managed-comfy' } })
       setJobMessage(`任务 ${job.id} 已加入本地队列`)
     } catch { setJobMessage('浏览器原型：任务参数已通过界面校验') }
     setTimeout(()=>setGenerating(false), 900)
+  }
+
+  const openHistory = async () => {
+    setHistoryDialog(true); setHistoryLoading(true)
+    try { setJobs(await invoke<JobRecord[]>('list_jobs', { limit:100 })) }
+    catch { setJobs([]) }
+    finally { setHistoryLoading(false) }
+  }
+
+  const validatePath = async () => {
+    setPathMessage('正在检查…')
+    try { const value = await invoke<string>('validate_output_path', { path:outputPath }); setOutputPath(value); setPathMessage('目录可写，已保存') }
+    catch (error) { setPathMessage(String(error)) }
   }
 
   const startDownload = () => {
@@ -85,14 +105,14 @@ function App() {
         <div className="brand"><div className="brand-mark"><Aperture size={20}/></div><div><strong>Langbai H3</strong><span>Studio</span></div></div>
         <nav aria-label="主导航">
           <button className="nav-item active"><WandSparkles/><span>开始创作</span></button>
-          <button className="nav-item"><Clock3/><span>生成记录</span><b>3</b></button>
+          <button className="nav-item" onClick={openHistory}><Clock3/><span>生成记录</span><b>{jobs.length || 3}</b></button>
           <button className="nav-item" onClick={()=>setModelDialog(true)}><Boxes/><span>模型中心</span></button>
           <button className="nav-item"><Zap/><span>加速插件</span></button>
           <button className="nav-item"><LayoutGrid/><span>工作流</span></button>
         </nav>
         <div className="sidebar-bottom">
           <div className="runtime-card"><div className="runtime-title"><span className="status-dot"/>{gpu ? '硬件检测完成' : '原型预览模式'}</div><small>{gpu ? `${gpu.name} · ${(gpu.memoryTotalMb/1024).toFixed(0)} GB` : 'RTX 4090 · 24 GB'}</small><div className="memory"><span style={{width:`${gpuPercent}%`}}/></div><small>{gpu ? `显存 ${(gpu.memoryUsedMb/1024).toFixed(1)} / ${(gpu.memoryTotalMb/1024).toFixed(0)} GB` : '显存 7.4 / 24 GB'}</small></div>
-          <button className="nav-item"><Settings/><span>设置</span></button>
+          <button className="nav-item" onClick={()=>setSettingsDialog(true)}><Settings/><span>设置</span></button>
           <button className="nav-item"><CircleHelp/><span>使用帮助</span></button>
         </div>
       </aside>
@@ -142,7 +162,7 @@ function App() {
 
             <aside className="summary-card">
               <div className="preview"><div className="preview-art"><div className="orbit one"/><div className="orbit two"/><Aperture/><span>生成预览将在这里显示</span></div><button className="expand">↗</button></div>
-              <div className="summary-body"><h2>生成准备</h2><div className="summary-row"><span><Cpu/> 运行方案</span><strong>单卡优化</strong></div><div className="summary-row"><span><HardDrive/> 预计显存</span><strong className="good">约 19.6 GB</strong></div><div className="summary-row"><span><Clock3/> 预计耗时</span><strong>{estimate}</strong></div><div className="summary-row"><span><FolderOpen/> 保存到</span><button>D:\H3作品 <ChevronRight/></button></div>
+              <div className="summary-body"><h2>生成准备</h2><div className="summary-row"><span><Cpu/> 运行方案</span><strong>单卡优化</strong></div><div className="summary-row"><span><HardDrive/> 预计显存</span><strong className="good">约 19.6 GB</strong></div><div className="summary-row"><span><Clock3/> 预计耗时</span><strong>{estimate}</strong></div><div className="summary-row"><span><FolderOpen/> 保存到</span><button onClick={()=>setSettingsDialog(true)}>{outputPath} <ChevronRight/></button></div>
                 <div className="fit-notice"><ShieldCheck/><span><strong>适合当前设备</strong><small>已自动启用模型卸载与分块解码</small></span></div>
                 <button className="generate" onClick={createGenerationJob} disabled={generating}>{generating ? <><span className="spinner"/> 正在创建任务…</> : <><Play/> 开始生成视频</>}</button><p className="queue-note">{jobMessage || '当前队列中有 1 个任务，预计等待 3 分钟'}</p>
               </div>
@@ -174,6 +194,22 @@ function App() {
           {modelError && <div className="probe-message error"><Info/><span><strong>扫描未完成</strong><small>{modelError}</small></span></div>}
           {modelScan && <div className="model-results"><div className="result-head"><strong>发现 {modelScan.models.length} 个模型</strong><small>扫描深度 {modelScan.maxDepth} 层</small></div>{modelScan.models.length===0?<div className="empty-result">目录中没有识别到 H3 模型结构</div>:modelScan.models.map((item,i)=><article key={i}><div className="model-icon"><Boxes/></div><div><strong>{item.modelType}</strong><small>{item.directory}</small><span>{item.integrity} · {(item.totalSizeBytes/1024/1024/1024).toFixed(1)} GB · {item.files.length} 个组件</span></div><button>关联</button></article>)}</div>}
           <div className="modal-note"><ShieldCheck/><span><strong>保持原文件位置</strong><small>关联后通过模型路径映射复用权重，不会复制数十 GB 文件。</small></span></div>
+        </section>
+      </div>}
+      {historyDialog && <div className="modal-backdrop" role="presentation" onMouseDown={e=>{if(e.target===e.currentTarget)setHistoryDialog(false)}}>
+        <section className="modal model-modal" role="dialog" aria-modal="true" aria-labelledby="history-title">
+          <div className="modal-head"><div><span className="eyebrow"><Clock3/> 本地任务</span><h2 id="history-title">生成记录</h2></div><button className="icon-button" onClick={()=>setHistoryDialog(false)} aria-label="关闭对话框"><X/></button></div>
+          <p>任务保存在本机 SQLite 数据库中，重启软件后仍可恢复参数和状态。</p>
+          <div className="job-list">{historyLoading?<div className="empty-result">正在读取任务…</div>:jobs.length===0?<div className="empty-result">暂时没有本地任务记录</div>:jobs.map(job=><article key={job.id}><div className={`job-state ${job.status}`}>{Math.round(job.progress*100)}%</div><div><strong>{job.name}</strong><small>{job.stage} · {job.backendId}</small><span>{new Date(job.updatedAt*1000).toLocaleString()}</span></div><button>复用设置</button></article>)}</div>
+        </section>
+      </div>}
+      {settingsDialog && <div className="modal-backdrop" role="presentation" onMouseDown={e=>{if(e.target===e.currentTarget)setSettingsDialog(false)}}>
+        <section className="modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+          <div className="modal-head"><div><span className="eyebrow"><FolderOpen/> 输出设置</span><h2 id="settings-title">视频保存路径</h2></div><button className="icon-button" onClick={()=>setSettingsDialog(false)} aria-label="关闭对话框"><X/></button></div>
+          <p>生成前会检查目录是否存在和可写。验证过程只创建并立即删除一个测试文件。</p>
+          <label htmlFor="output-path">默认保存目录</label>
+          <div className="url-row"><input id="output-path" value={outputPath} onChange={e=>{setOutputPath(e.target.value);setPathMessage('')}} /><button onClick={validatePath}>验证并保存</button></div>
+          {pathMessage && <div className={`probe-message ${pathMessage.includes('可写')?'success':'error'}`}><ShieldCheck/><span><strong>{pathMessage}</strong><small>后续任务可单独覆盖此目录。</small></span></div>}
         </section>
       </div>}
     </div>
