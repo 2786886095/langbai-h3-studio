@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import { open } from '@tauri-apps/plugin-dialog'
 import {
   Aperture, Boxes, ChevronDown, ChevronRight, CircleHelp, Clock3, Cpu,
   Download, FolderOpen, HardDrive, Image, Info, LayoutGrid, Menu,
@@ -19,6 +20,7 @@ type TransferProgress = { phase:string;downloadedBytes?:number;totalBytes?:numbe
 type ModelBundle = { id:string;name:string;variant:string;revision:string;license:string;licenseUrl:string;recommendedVramGb:number;recommendedRamGb:number;files:Array<{relativePath:string;size:number;sha256:string}> }
 type ModelBundleFileEvent = { bundleId:string;index:number;count:number;relativePath:string;size:number }
 type ModelDownloadEvent = { relativePath:string;progress:TransferProgress }
+type LocalAsset = { path:string;name:string;size:number;mime:string;kind:'image'|'video'|'audio';role:'start_frame'|'end_frame'|'reference'|'motion_reference'|'audio_reference';status:'selected'|'uploading'|'ready'|'error';remoteName?:string;error?:string }
 
 const modeContent = {
   text: { title: '文字生成视频', desc: '只需描述画面、镜头和声音，适合从零开始创作。' },
@@ -62,6 +64,8 @@ function App() {
   const [modelInstallMessage, setModelInstallMessage] = useState('')
   const [modelFile, setModelFile] = useState<ModelBundleFileEvent | null>(null)
   const [modelProgress, setModelProgress] = useState<TransferProgress | null>(null)
+  const [assets, setAssets] = useState<LocalAsset[]>([])
+  const [assetError, setAssetError] = useState('')
   const estimate = useMemo(() => duration <= 6 ? '约 8–12 分钟' : duration <= 10 ? '约 14–20 分钟' : '约 22–30 分钟', [duration])
 
   useEffect(() => {
@@ -93,6 +97,24 @@ function App() {
     finally { setScanningModels(false) }
   }
 
+  const chooseAssets = async () => {
+    setAssetError('')
+    try {
+      const selected = await open({
+        multiple:true,
+        filters:[{name:mode==='frames'?'图片素材':'图片、视频和音频',extensions:mode==='frames'?['png','jpg','jpeg','webp']:['png','jpg','jpeg','webp','mp4','webm','mov','wav','mp3','flac','m4a']}]
+      })
+      if (!selected) return
+      const paths = Array.isArray(selected) ? selected : [selected]
+      const inspected = await invoke<Array<Omit<LocalAsset,'role'|'status'>>>('inspect_input_files',{paths})
+      if (mode==='frames' && (inspected.length>2 || inspected.some(item=>item.kind!=='image'))) throw new Error('首尾帧模式最多选择 2 张图片')
+      const next = inspected.map((item,index):LocalAsset=>({...item,status:'selected',role:mode==='frames'?(index===0?'start_frame':'end_frame'):(item.kind==='audio'?'audio_reference':item.kind==='video'?'motion_reference':'reference')}))
+      setAssets(next)
+    } catch(error) { setAssetError(String(error)) }
+  }
+
+  const removeAsset = (path:string) => setAssets(items=>items.filter(item=>item.path!==path))
+
   const createGenerationJob = async () => {
     setGenerating(true); setJobMessage('')
     const request = { mode, prompt, duration, width:1360, height:768, fps:24, quality:'standard', outputDirectory:outputPath }
@@ -114,6 +136,16 @@ function App() {
     setPathMessage('正在检查…')
     try { const value = await invoke<string>('validate_output_path', { path:outputPath }); setOutputPath(value); setPathMessage('目录可写，已保存') }
     catch (error) { setPathMessage(String(error)) }
+  }
+
+  const chooseOutputPath = async () => {
+    const selected = await open({directory:true,multiple:false,title:'选择视频保存目录'})
+    if (typeof selected === 'string') { setOutputPath(selected); setPathMessage('') }
+  }
+
+  const chooseModelPath = async () => {
+    const selected = await open({directory:true,multiple:false,title:'选择 MiniMax-H3 模型目录'})
+    if (typeof selected === 'string') { setModelPath(selected); setModelScan(null); setModelError('') }
   }
 
   const installRuntime = async (variant:string) => {
@@ -178,7 +210,7 @@ function App() {
 
           <div className="columns">
             <section className="creator-card">
-              {mode !== 'text' && <div className="field"><div className="label-row"><label>参考素材</label><span>{mode === 'frames' ? '支持 1–2 张图片' : '最多 12 个文件'}</span></div><button className="dropzone"><Upload/><strong>拖入图片、视频或音频</strong><small>或点击浏览本地文件</small></button></div>}
+              {mode !== 'text' && <div className="field"><div className="label-row"><label>参考素材</label><span>{assets.length}/{mode === 'frames' ? 2 : 12}</span></div><button className="dropzone" onClick={chooseAssets}><Upload/><strong>{mode==='frames'?'选择首帧或尾帧图片':'选择图片、视频或音频'}</strong><small>使用 Windows 文件选择器，可一次多选</small></button>{assetError&&<div className="inline-error"><Info/>{assetError}</div>}{assets.length>0&&<div className="asset-list">{assets.map((asset,index)=><article key={asset.path}><div className={`asset-kind ${asset.kind}`}>{asset.kind==='image'?<Image/>:asset.kind==='video'?<Video/>:<Aperture/>}</div><div><strong>{asset.name}</strong><small>{mode==='frames'?(index===0?'首帧':'尾帧'):asset.kind==='image'?'图片参考':asset.kind==='video'?'动作参考':'声音参考'} · {(asset.size/1024/1024).toFixed(asset.size>1024*1024?1:2)} MB</small></div><button onClick={()=>removeAsset(asset.path)} aria-label={`移除 ${asset.name}`}><X/></button></article>)}</div>}</div>}
               <div className="field">
                 <div className="label-row"><label htmlFor="prompt">描述你的视频</label><button><Info/> 提示词技巧</button></div>
                 <div className="textarea-wrap"><textarea id="prompt" value={prompt} onChange={e=>setPrompt(e.target.value)} maxLength={2000}/><span>{prompt.length} / 2000</span></div>
@@ -237,7 +269,7 @@ function App() {
           {modelInstallMessage && <div className={`probe-message ${modelInstallMessage.includes('完成')?'success':'error'}`}><ShieldCheck/><span><strong>{modelInstallMessage.includes('完成')?'模型可用':'安装未完成'}</strong><small>{modelInstallMessage}</small></span></div>}
           <div className="section-divider"><span>或使用本地已有模型</span></div>
           <label htmlFor="model-path">模型目录</label>
-          <div className="url-row"><input id="model-path" value={modelPath} onChange={e=>setModelPath(e.target.value)} /><button onClick={scanModels} disabled={scanningModels}>{scanningModels?'正在扫描…':'扫描目录'}</button></div>
+          <div className="url-row"><input id="model-path" value={modelPath} onChange={e=>setModelPath(e.target.value)} /><button onClick={chooseModelPath}>选择目录</button><button onClick={scanModels} disabled={scanningModels}>{scanningModels?'正在扫描…':'扫描'}</button></div>
           {modelError && <div className="probe-message error"><Info/><span><strong>扫描未完成</strong><small>{modelError}</small></span></div>}
           {modelScan && <div className="model-results"><div className="result-head"><strong>发现 {modelScan.models.length} 个模型</strong><small>扫描深度 {modelScan.maxDepth} 层</small></div>{modelScan.models.length===0?<div className="empty-result">目录中没有识别到 H3 模型结构</div>:modelScan.models.map((item,i)=><article key={i}><div className="model-icon"><Boxes/></div><div><strong>{item.modelType}</strong><small>{item.directory}</small><span>{item.integrity} · {(item.totalSizeBytes/1024/1024/1024).toFixed(1)} GB · {item.files.length} 个组件</span></div><button>关联</button></article>)}</div>}
           <div className="modal-note"><ShieldCheck/><span><strong>保持原文件位置</strong><small>关联后通过模型路径映射复用权重，不会复制数十 GB 文件。</small></span></div>
@@ -255,7 +287,7 @@ function App() {
           <div className="modal-head"><div><span className="eyebrow"><FolderOpen/> 输出设置</span><h2 id="settings-title">视频保存路径</h2></div><button className="icon-button" onClick={()=>setSettingsDialog(false)} aria-label="关闭对话框"><X/></button></div>
           <p>生成前会检查目录是否存在和可写。验证过程只创建并立即删除一个测试文件。</p>
           <label htmlFor="output-path">默认保存目录</label>
-          <div className="url-row"><input id="output-path" value={outputPath} onChange={e=>{setOutputPath(e.target.value);setPathMessage('')}} /><button onClick={validatePath}>验证并保存</button></div>
+          <div className="url-row"><input id="output-path" value={outputPath} onChange={e=>{setOutputPath(e.target.value);setPathMessage('')}} /><button onClick={chooseOutputPath}>选择目录</button><button onClick={validatePath}>验证</button></div>
           {pathMessage && <div className={`probe-message ${pathMessage.includes('可写')?'success':'error'}`}><ShieldCheck/><span><strong>{pathMessage}</strong><small>后续任务可单独覆盖此目录。</small></span></div>}
         </section>
       </div>}

@@ -455,6 +455,111 @@ struct CompiledWorkflow {
     prompt_request: comfy::PromptRequest,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalAssetMeta {
+    path: String,
+    name: String,
+    size: u64,
+    mime: String,
+    kind: String,
+}
+
+fn asset_type(path: &std::path::Path) -> Option<(&'static str, &'static str)> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    Some(match extension.as_str() {
+        "png" => ("image", "image/png"),
+        "jpg" | "jpeg" => ("image", "image/jpeg"),
+        "webp" => ("image", "image/webp"),
+        "mp4" => ("video", "video/mp4"),
+        "webm" => ("video", "video/webm"),
+        "mov" => ("video", "video/quicktime"),
+        "wav" => ("audio", "audio/wav"),
+        "mp3" => ("audio", "audio/mpeg"),
+        "flac" => ("audio", "audio/flac"),
+        "m4a" => ("audio", "audio/mp4"),
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod local_asset_tests {
+    use super::asset_type;
+    use std::path::Path;
+
+    #[test]
+    fn recognizes_supported_media_case_insensitively() {
+        assert_eq!(
+            asset_type(Path::new("frame.PNG")),
+            Some(("image", "image/png"))
+        );
+        assert_eq!(
+            asset_type(Path::new("clip.MP4")),
+            Some(("video", "video/mp4"))
+        );
+        assert_eq!(
+            asset_type(Path::new("voice.FLAC")),
+            Some(("audio", "audio/flac"))
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_or_missing_extensions() {
+        assert_eq!(asset_type(Path::new("payload.exe")), None);
+        assert_eq!(asset_type(Path::new("README")), None);
+    }
+}
+
+#[tauri::command]
+fn inspect_input_files(paths: Vec<String>) -> Result<Vec<LocalAssetMeta>, String> {
+    if paths.is_empty() || paths.len() > 12 {
+        return Err("一次请选择 1–12 个素材文件".into());
+    }
+    paths
+        .into_iter()
+        .map(|raw| {
+            let path = std::fs::canonicalize(&raw).map_err(|e| format!("读取素材失败：{e}"))?;
+            let metadata =
+                std::fs::metadata(&path).map_err(|e| format!("读取素材信息失败：{e}"))?;
+            if !metadata.is_file() || metadata.len() == 0 {
+                return Err("素材必须是非空文件".into());
+            }
+            let (kind, mime) = asset_type(&path)
+                .ok_or_else(|| "仅支持 PNG/JPG/WebP、MP4/WebM/MOV、WAV/MP3/FLAC/M4A".to_string())?;
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| "素材文件名必须是有效 Unicode".to_string())?
+                .to_owned();
+            Ok(LocalAssetMeta {
+                path: path.to_string_lossy().into_owned(),
+                name,
+                size: metadata.len(),
+                mime: mime.into(),
+                kind: kind.into(),
+            })
+        })
+        .collect()
+}
+
+#[tauri::command]
+async fn comfy_upload_input(
+    base_url: String,
+    path: String,
+    mime: String,
+    subfolder: String,
+) -> Result<comfy_transport::UploadReceipt, String> {
+    let canonical = std::fs::canonicalize(&path).map_err(|e| format!("读取素材失败：{e}"))?;
+    let (_, expected_mime) =
+        asset_type(&canonical).ok_or_else(|| "素材格式不受支持".to_string())?;
+    if mime != expected_mime {
+        return Err("素材类型与扩展名不一致".into());
+    }
+    comfy_transport::ComfyTransport::new(&base_url, Duration::from_secs(60 * 60 * 2))?
+        .upload_input_path(&canonical, expected_mime, Some(&subfolder), false)
+        .await
+}
+
 #[tauri::command]
 fn compile_workflow(
     template_json: String,
@@ -646,6 +751,7 @@ fn validate_output_path(path: String) -> Result<String, String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             probe_system,
             probe_comfyui,
@@ -673,6 +779,8 @@ pub fn run() {
             comfy_get_queue,
             comfy_get_history,
             comfy_interrupt,
+            inspect_input_files,
+            comfy_upload_input,
             job_store::create_job,
             job_store::list_jobs,
             job_store::update_job

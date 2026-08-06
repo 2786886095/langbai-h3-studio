@@ -7,6 +7,7 @@ use reqwest::{Client, Url, multipart};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::net::IpAddr;
+use std::path::Path;
 use std::time::Duration;
 
 #[derive(Clone)]
@@ -131,6 +132,66 @@ impl ComfyTransport {
                     .post(self.endpoint("upload/image")?)
                     .multipart(form),
                 "上传输入文件",
+            )
+            .await?;
+        Ok(UploadReceipt {
+            name: required_string(&value, "name", "文件名")?,
+            subfolder: value
+                .get("subfolder")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
+            kind: value
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("input")
+                .to_owned(),
+        })
+    }
+
+    /// 从磁盘流式上传素材，避免将大型视频或音频完整载入内存。
+    pub async fn upload_input_path(
+        &self,
+        path: &Path,
+        mime: &str,
+        subfolder: Option<&str>,
+        overwrite: bool,
+    ) -> Result<UploadReceipt, String> {
+        let filename = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "素材文件名无效".to_string())?;
+        let metadata = tokio::fs::metadata(path)
+            .await
+            .map_err(|e| format!("读取素材失败：{e}"))?;
+        if !metadata.is_file() || metadata.len() == 0 {
+            return Err("素材必须是非空文件".into());
+        }
+        let file = tokio::fs::File::open(path)
+            .await
+            .map_err(|e| format!("打开素材失败：{e}"))?;
+        let stream = tokio_util::io::ReaderStream::new(file);
+        let part =
+            multipart::Part::stream_with_length(reqwest::Body::wrap_stream(stream), metadata.len())
+                .file_name(filename.to_owned())
+                .mime_str(mime)
+                .map_err(|_| "素材媒体类型无效".to_string())?;
+        let mut form = multipart::Form::new()
+            .part("image", part)
+            .text("overwrite", overwrite.to_string());
+        if let Some(folder) = subfolder.filter(|value| !value.is_empty()) {
+            if folder.contains("..") || folder.starts_with(['/', '\\']) {
+                return Err("上传子目录无效".into());
+            }
+            form = form.text("subfolder", folder.to_owned());
+        }
+        let value = self
+            .request_json(
+                self.client
+                    .post(self.endpoint("upload/image")?)
+                    .multipart(form),
+                "上传输入素材",
             )
             .await?;
         Ok(UploadReceipt {
