@@ -17,6 +17,7 @@ mod h3_workflow;
 mod job_store;
 mod model_bundle;
 mod model_store;
+mod plugin_manager;
 mod runtime_installer;
 mod runtime_manager;
 mod update_manager;
@@ -330,6 +331,89 @@ fn runtime_rollback_h3_preview_patch() -> Result<(), String> {
     )
 }
 
+fn current_plugin_manager() -> Result<plugin_manager::PluginManager, String> {
+    let current = runtime_manager::RuntimeManager::new(runtime_root())
+        .current()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "请先安装托管 ComfyUI 运行环境".to_string())?;
+    Ok(plugin_manager::PluginManager::new(current.profile_dir))
+}
+
+async fn comfy_node_set(base_url: &str) -> Result<std::collections::BTreeSet<String>, String> {
+    let info = comfy_transport::ComfyTransport::new(base_url, Duration::from_secs(20))?
+        .get_object_info()
+        .await?;
+    info.as_object()
+        .map(|value| value.keys().cloned().collect())
+        .ok_or_else(|| "ComfyUI 节点能力响应格式无效".into())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginInspectionResult {
+    package: plugin_manager::PackageInspection,
+    compatibility: plugin_manager::CompatibilityReport,
+}
+
+#[tauri::command]
+fn plugin_list() -> Result<plugin_manager::PluginLock, String> {
+    current_plugin_manager()?
+        .read_lock()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn plugin_inspect(path: String, base_url: String) -> Result<PluginInspectionResult, String> {
+    let path = std::path::Path::new(&path);
+    if path.extension().and_then(|value| value.to_str()) != Some("h3plugin") {
+        return Err("请选择 .h3plugin 插件包".into());
+    }
+    let package = plugin_manager::inspect_package(path, None).map_err(|e| e.to_string())?;
+    let manager = current_plugin_manager()?;
+    let compatibility = manager
+        .compatibility(
+            &package,
+            env!("CARGO_PKG_VERSION"),
+            &comfy_node_set(&base_url).await?,
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(PluginInspectionResult {
+        package,
+        compatibility,
+    })
+}
+
+#[tauri::command]
+async fn plugin_install(
+    path: String,
+    expected_sha256: String,
+    base_url: String,
+) -> Result<plugin_manager::LockedPlugin, String> {
+    let manager = current_plugin_manager()?;
+    manager
+        .install(
+            std::path::Path::new(&path),
+            Some(&expected_sha256),
+            env!("CARGO_PKG_VERSION"),
+            &comfy_node_set(&base_url).await?,
+        )
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn plugin_set_enabled(id: String, enabled: bool) -> Result<(), String> {
+    current_plugin_manager()?
+        .set_enabled(&id, enabled)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn plugin_uninstall(id: String) -> Result<(), String> {
+    current_plugin_manager()?
+        .uninstall(&id)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn runtime_download_install_activate(
     app: tauri::AppHandle,
@@ -622,6 +706,123 @@ fn update_check_manifest(
 fn update_verify_file(path: String, sha256: String) -> Result<(), String> {
     update_manager::verify_sha256(std::path::Path::new(&path), &sha256)
         .map_err(|e| format!("更新包校验失败：{e:?}"))
+}
+
+fn validate_github_download_url(raw: &str) -> Result<(), String> {
+    let url = Url::parse(raw).map_err(|_| "更新下载地址格式无效".to_string())?;
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    if url.scheme() != "https"
+        || !(host == "github.com"
+            || host.ends_with(".githubusercontent.com")
+            || host.ends_with(".github-releases.githubusercontent.com"))
+    {
+        return Err("更新包只能从 GitHub HTTPS 地址下载".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn update_check_github(
+    include_pre_release: bool,
+) -> Result<Option<update_manager::UpdateCandidate>, String> {
+    let releases = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .user_agent("Langbai-H3-Studio-Updater")
+        .build()
+        .map_err(|e| format!("创建更新客户端失败：{e}"))?
+        .get("https://api.github.com/repos/2786886095/langbai-h3-studio/releases?per_page=20")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| format!("检查 GitHub 更新失败：{e}"))?
+        .error_for_status()
+        .map_err(|e| format!("检查 GitHub 更新失败：{e}"))?
+        .text()
+        .await
+        .map_err(|e| format!("读取 GitHub 更新失败：{e}"))?;
+    let channel = if include_pre_release {
+        update_manager::UpdateChannel::PreRelease
+    } else {
+        update_manager::UpdateChannel::Stable
+    };
+    update_manager::select_windows_candidate(env!("CARGO_PKG_VERSION"), &releases, channel)
+        .map_err(|e| format!("解析更新信息失败：{e}"))
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadedUpdate {
+    version: String,
+    installer_path: String,
+    sha256: String,
+}
+
+#[tauri::command]
+async fn update_download_candidate(
+    app: tauri::AppHandle,
+    candidate: update_manager::UpdateCandidate,
+) -> Result<DownloadedUpdate, String> {
+    validate_github_download_url(&candidate.download_url)?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60 * 60))
+        .user_agent("Langbai-H3-Studio-Updater")
+        .build()
+        .map_err(|e| format!("创建更新下载客户端失败：{e}"))?;
+    let sha256 = if let Some(value) = candidate.sha256.clone() {
+        value
+    } else {
+        let url = candidate
+            .sha256_url
+            .as_deref()
+            .ok_or_else(|| "更新缺少 SHA-256 校验文件".to_string())?;
+        validate_github_download_url(url)?;
+        let text = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| format!("下载更新校验文件失败：{e}"))?
+            .error_for_status()
+            .map_err(|e| format!("下载更新校验文件失败：{e}"))?
+            .text()
+            .await
+            .map_err(|e| format!("读取更新校验文件失败：{e}"))?;
+        text.split_whitespace()
+            .find(|value| value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()))
+            .ok_or_else(|| "更新校验文件中没有有效 SHA-256".to_string())?
+            .to_ascii_lowercase()
+    };
+    let request = download::DownloadRequest {
+        source_url: candidate.download_url.clone(),
+        relative_path: PathBuf::from("updates").join(&candidate.file_name),
+        expected_sha256: sha256.clone(),
+    };
+    let result = download::download_model(&client, &runtime_root(), &request, |progress| {
+        let _ = app.emit("update-download-progress", progress);
+    })
+    .await?;
+    Ok(DownloadedUpdate {
+        version: candidate.version,
+        installer_path: result.path.to_string_lossy().into_owned(),
+        sha256,
+    })
+}
+
+#[tauri::command]
+fn update_launch_installer(app: tauri::AppHandle, installer_path: String) -> Result<(), String> {
+    let path =
+        std::fs::canonicalize(installer_path).map_err(|e| format!("读取更新安装包失败：{e}"))?;
+    let allowed = std::fs::canonicalize(runtime_root().join("updates"))
+        .map_err(|e| format!("读取更新目录失败：{e}"))?;
+    if !path.starts_with(&allowed)
+        || path.extension().and_then(|value| value.to_str()) != Some("exe")
+    {
+        return Err("更新安装包路径无效".into());
+    }
+    Command::new(&path)
+        .spawn()
+        .map_err(|e| format!("启动更新安装包失败：{e}"))?;
+    app.exit(0);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1064,6 +1265,11 @@ pub fn run() {
             start_h3_generation,
             runtime_install_h3_preview_patch,
             runtime_rollback_h3_preview_patch,
+            plugin_list,
+            plugin_inspect,
+            plugin_install,
+            plugin_set_enabled,
+            plugin_uninstall,
             runtime_download_install_activate,
             runtime_prepare_staging,
             runtime_activate_staged,
@@ -1073,6 +1279,9 @@ pub fn run() {
             workflow_capabilities,
             update_check_manifest,
             update_verify_file,
+            update_check_github,
+            update_download_candidate,
+            update_launch_installer,
             runtime_start,
             runtime_status,
             runtime_stop,

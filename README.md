@@ -35,6 +35,8 @@ Windows Setup 构建需从 Visual Studio x64 Developer Command Prompt 执行：`
 
 `v0.6.0` 首次接通官方 H3 API Graph、素材上传、任务提交、状态轮询和结果保存；真实 H3 GPU 生成仍需按兼容性文档完成固定上游预览补丁与硬件实测，因此该版本以 GitHub Pre-release 发布。
 
+最新预览版为 `v0.6.1`：`release/v0.6.1/Langbai-H3-Studio_0.6.1_x64-setup.exe`。SHA-256：`F34FFA8A4E6F8171E9F8A2FAA9669B118F30C737C64C769AB12651E974AFA0AD`。该版本新增声明式加速插件管理、应用内更新和新手参数说明。
+
 ## 文档
 
 - [产品需求文档](docs/PRD.md)

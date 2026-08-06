@@ -24,6 +24,10 @@ type H3PatchManifest = { id:string;commit:string;pullRequest:number;url:string;s
 type LocalAsset = { path:string;name:string;size:number;mime:string;kind:'image'|'video'|'audio';role:'start_frame'|'end_frame'|'reference'|'motion_reference'|'audio_reference';status:'selected'|'uploading'|'ready'|'error';remoteName?:string;error?:string }
 type StartedGeneration = { promptId:string;queueNumber?:number;uploadedAssets:number;filenamePrefix:string;outputDirectory:string }
 type GenerationPoll = { status:'queued'|'running'|'completed'|'failed'|'unknown';promptId:string;queuePosition?:number;outputs:Array<{filename:string;subfolder:string;mediaType:string}>;error?:string }
+type UpdateCandidate = { version:string;fileName:string;downloadUrl:string;sha256?:string;sha256Url?:string;preRelease:boolean }
+type DownloadedUpdate = { version:string;installerPath:string;sha256:string }
+type PluginLock = { plugins:Record<string,{version:string;enabled:boolean;sha256:string;provides:string[]}> }
+type PluginInspection = { package:{manifest:{id:string;name:string;version:string;provides:string[];license?:string};packageSha256:string;files:string[]};compatibility:{compatible:boolean;missingNodes:string[];conflicts:string[];provides:string[];reasons:string[]} }
 
 const modeContent = {
   text: { title: '文字生成视频', desc: '只需描述画面、镜头和声音，适合从零开始创作。' },
@@ -75,6 +79,17 @@ function App() {
   const [h3PatchProgress, setH3PatchProgress] = useState<TransferProgress | null>(null)
   const [activePromptId, setActivePromptId] = useState('')
   const [generationPoll, setGenerationPoll] = useState<GenerationPoll | null>(null)
+  const [checkingUpdate, setCheckingUpdate] = useState(false)
+  const [updateCandidate, setUpdateCandidate] = useState<UpdateCandidate | null>(null)
+  const [updateProgress, setUpdateProgress] = useState<TransferProgress | null>(null)
+  const [downloadedUpdate, setDownloadedUpdate] = useState<DownloadedUpdate | null>(null)
+  const [updateMessage, setUpdateMessage] = useState('')
+  const [pluginDialog, setPluginDialog] = useState(false)
+  const [pluginLock, setPluginLock] = useState<PluginLock>({plugins:{}})
+  const [pluginPackagePath, setPluginPackagePath] = useState('')
+  const [pluginInspection, setPluginInspection] = useState<PluginInspection | null>(null)
+  const [pluginMessage, setPluginMessage] = useState('')
+  const [helpDialog, setHelpDialog] = useState(false)
   const estimate = useMemo(() => duration <= 6 ? '约 8–12 分钟' : duration <= 10 ? '约 14–20 分钟' : '约 22–30 分钟', [duration])
 
   useEffect(() => {
@@ -88,6 +103,7 @@ function App() {
       listen<ModelBundleFileEvent>('model-bundle-file', event=>{setModelFile(event.payload);setModelProgress(null)}),
       listen<ModelDownloadEvent>('model-download-progress', event=>setModelProgress(event.payload.progress)),
       listen<TransferProgress>('h3-patch-download-progress', event=>setH3PatchProgress(event.payload)),
+      listen<TransferProgress>('update-download-progress', event=>setUpdateProgress(event.payload)),
     ]).catch(()=>[] as Array<()=>void>)
     return ()=>{unlisteners.then(items=>items.forEach(fn=>fn()))}
   }, [])
@@ -206,6 +222,52 @@ function App() {
     finally { setInstallingH3Patch(false) }
   }
 
+  const checkUpdate = async () => {
+    setCheckingUpdate(true);setUpdateMessage('');setUpdateCandidate(null);setDownloadedUpdate(null)
+    try{
+      const candidate=await invoke<UpdateCandidate|null>('update_check_github',{includePreRelease:true})
+      setUpdateCandidate(candidate);setUpdateMessage(candidate?`发现 ${candidate.version}${candidate.preRelease?' 预览版':''}`:'当前已经是最新版本')
+    }catch(error){setUpdateMessage(String(error))}finally{setCheckingUpdate(false)}
+  }
+
+  const downloadUpdate = async () => {
+    if(!updateCandidate)return
+    setUpdateMessage('正在下载并校验更新…');setUpdateProgress({phase:'preparing',progressPercent:0})
+    try{const value=await invoke<DownloadedUpdate>('update_download_candidate',{candidate:updateCandidate});setDownloadedUpdate(value);setUpdateMessage('更新安装包已下载并通过 SHA-256 校验')}
+    catch(error){setUpdateMessage(String(error))}
+  }
+
+  const launchUpdate = async () => {
+    if(downloadedUpdate)await invoke('update_launch_installer',{installerPath:downloadedUpdate.installerPath})
+  }
+
+  const openPlugins = async () => {
+    setPluginDialog(true);setPluginMessage('');setPluginInspection(null)
+    try{setPluginLock(await invoke<PluginLock>('plugin_list'))}catch(error){setPluginMessage(String(error))}
+  }
+
+  const choosePluginPackage = async () => {
+    const selected=await open({multiple:false,filters:[{name:'H3 声明式插件',extensions:['h3plugin']}]})
+    if(typeof selected!=='string')return
+    setPluginPackagePath(selected);setPluginMessage('正在检查插件包、依赖和冲突…')
+    try{const value=await invoke<PluginInspection>('plugin_inspect',{path:selected,baseUrl:comfyUrl});setPluginInspection(value);setPluginMessage(value.compatibility.compatible?'插件包验证通过':'插件当前不兼容')}
+    catch(error){setPluginInspection(null);setPluginMessage(String(error))}
+  }
+
+  const installPlugin = async () => {
+    if(!pluginInspection)return
+    try{await invoke('plugin_install',{path:pluginPackagePath,expectedSha256:pluginInspection.package.packageSha256,baseUrl:comfyUrl});setPluginLock(await invoke<PluginLock>('plugin_list'));setPluginInspection(null);setPluginMessage('插件已安装并启用')}
+    catch(error){setPluginMessage(String(error))}
+  }
+
+  const togglePlugin = async (id:string,enabled:boolean) => {
+    await invoke('plugin_set_enabled',{id,enabled});setPluginLock(await invoke<PluginLock>('plugin_list'))
+  }
+
+  const uninstallPlugin = async (id:string) => {
+    await invoke('plugin_uninstall',{id});setPluginLock(await invoke<PluginLock>('plugin_list'));setPluginMessage('插件已卸载')
+  }
+
   const installModelBundle = async () => {
     setInstallingModel(true); setModelInstallMessage(''); setModelProgress({phase:'preparing',progressPercent:0})
     try {
@@ -224,13 +286,13 @@ function App() {
           <button className="nav-item active"><WandSparkles/><span>开始创作</span></button>
           <button className="nav-item" onClick={openHistory}><Clock3/><span>生成记录</span><b>{jobs.length || 3}</b></button>
           <button className="nav-item" onClick={()=>setModelDialog(true)}><Boxes/><span>模型中心</span></button>
-          <button className="nav-item"><Zap/><span>加速插件</span></button>
+          <button className="nav-item" onClick={openPlugins}><Zap/><span>加速插件</span><b>{Object.keys(pluginLock.plugins).length||''}</b></button>
           <button className="nav-item"><LayoutGrid/><span>工作流</span></button>
         </nav>
         <div className="sidebar-bottom">
           <div className="runtime-card"><div className="runtime-title"><span className="status-dot"/>{gpu ? '硬件检测完成' : '原型预览模式'}</div><small>{gpu ? `${gpu.name} · ${(gpu.memoryTotalMb/1024).toFixed(0)} GB` : 'RTX 4090 · 24 GB'}</small><div className="memory"><span style={{width:`${gpuPercent}%`}}/></div><small>{gpu ? `显存 ${(gpu.memoryUsedMb/1024).toFixed(1)} / ${(gpu.memoryTotalMb/1024).toFixed(0)} GB` : '显存 7.4 / 24 GB'}</small></div>
           <button className="nav-item" onClick={()=>setSettingsDialog(true)}><Settings/><span>设置</span></button>
-          <button className="nav-item"><CircleHelp/><span>使用帮助</span></button>
+          <button className="nav-item" onClick={()=>setHelpDialog(true)}><CircleHelp/><span>使用帮助</span></button>
         </div>
       </aside>
 
@@ -261,7 +323,7 @@ function App() {
             <section className="creator-card">
               {mode !== 'text' && <div className="field"><div className="label-row"><label>参考素材</label><span>{assets.length}/{mode === 'frames' ? 2 : 12}</span></div><button className="dropzone" onClick={chooseAssets}><Upload/><strong>{mode==='frames'?'选择首帧或尾帧图片':'选择图片、视频或音频'}</strong><small>使用 Windows 文件选择器，可一次多选</small></button>{assetError&&<div className="inline-error"><Info/>{assetError}</div>}{assets.length>0&&<div className="asset-list">{assets.map((asset,index)=><article key={asset.path}><div className={`asset-kind ${asset.kind}`}>{asset.kind==='image'?<Image/>:asset.kind==='video'?<Video/>:<Aperture/>}</div><div><strong>{asset.name}</strong><small>{mode==='frames'?(index===0?'首帧':'尾帧'):asset.kind==='image'?'图片参考':asset.kind==='video'?'动作参考':'声音参考'} · {(asset.size/1024/1024).toFixed(asset.size>1024*1024?1:2)} MB</small></div><button onClick={()=>removeAsset(asset.path)} aria-label={`移除 ${asset.name}`}><X/></button></article>)}</div>}</div>}
               <div className="field">
-                <div className="label-row"><label htmlFor="prompt">描述你的视频</label><button><Info/> 提示词技巧</button></div>
+                <div className="label-row"><label htmlFor="prompt">描述你的视频</label><button onClick={()=>setHelpDialog(true)}><Info/> 参数与提示词说明</button></div>
                 <div className="textarea-wrap"><textarea id="prompt" value={prompt} onChange={e=>setPrompt(e.target.value)} maxLength={2000}/><span>{prompt.length} / 2000</span></div>
                 <div className="suggestions"><span>试试添加：</span><button>镜头运动</button><button>光线氛围</button><button>环境音效</button><button>对白</button></div>
               </div>
@@ -327,6 +389,34 @@ function App() {
           <div className="modal-note"><ShieldCheck/><span><strong>保持原文件位置</strong><small>关联后通过模型路径映射复用权重，不会复制数十 GB 文件。</small></span></div>
         </section>
       </div>}
+      {pluginDialog && <div className="modal-backdrop" role="presentation" onMouseDown={e=>{if(e.target===e.currentTarget)setPluginDialog(false)}}>
+        <section className="modal model-modal" role="dialog" aria-modal="true" aria-labelledby="plugin-title">
+          <div className="modal-head"><div><span className="eyebrow"><Zap/> 扩展能力</span><h2 id="plugin-title">加速插件</h2></div><button className="icon-button" onClick={()=>setPluginDialog(false)} aria-label="关闭对话框"><X/></button></div>
+          <p>只安装声明式 `.h3plugin` 适配包。包内脚本和二进制会被拒绝；外部 ComfyUI 节点仍由用户或 Runtime 独立管理。</p>
+          <button className="primary wide" onClick={choosePluginPackage}>导入 .h3plugin 文件</button>
+          {pluginInspection&&<div className="plugin-inspection"><div><strong>{pluginInspection.package.manifest.name}</strong><span>v{pluginInspection.package.manifest.version} · {pluginInspection.package.manifest.license||'许可证未声明'}</span></div><div className="capability-tags">{pluginInspection.compatibility.provides.map(item=><span key={item}>{item}</span>)}</div>{pluginInspection.compatibility.reasons.map(item=><small key={item}>{item}</small>)}<button onClick={installPlugin} disabled={!pluginInspection.compatibility.compatible}>{pluginInspection.compatibility.compatible?'安装并启用':'当前环境不兼容'}</button></div>}
+          <div className="section-divider"><span>已安装</span></div>
+          <div className="plugin-list">{Object.keys(pluginLock.plugins).length===0?<div className="empty-result">尚未安装社区插件</div>:Object.entries(pluginLock.plugins).map(([id,item])=><article key={id}><div className="model-icon"><Zap/></div><div><strong>{id}</strong><small>v{item.version} · {item.provides.join('、')||'声明式适配'}</small></div><button onClick={()=>togglePlugin(id,!item.enabled)}>{item.enabled?'已启用':'已停用'}</button><button className="danger-link" onClick={()=>uninstallPlugin(id)}>卸载</button></article>)}</div>
+          {pluginMessage&&<div className={`probe-message ${pluginMessage.includes('通过')||pluginMessage.includes('已安装')||pluginMessage.includes('已卸载')?'success':'error'}`}><ShieldCheck/><span><strong>{pluginMessage}</strong><small>插件状态写入当前托管 Runtime Profile 的 lock.json。</small></span></div>}
+        </section>
+      </div>}
+      {helpDialog && <div className="modal-backdrop" role="presentation" onMouseDown={e=>{if(e.target===e.currentTarget)setHelpDialog(false)}}>
+        <section className="modal model-modal" role="dialog" aria-modal="true" aria-labelledby="help-title">
+          <div className="modal-head"><div><span className="eyebrow"><CircleHelp/> 新手指南</span><h2 id="help-title">参数与提示词说明</h2></div><button className="icon-button" onClick={()=>setHelpDialog(false)} aria-label="关闭对话框"><X/></button></div>
+          <p>界面只展示对 H3 官方工作流确实有效的主要参数。没有可靠节点映射的 CFG、负面提示词和任意 FPS 不会伪装成可用设置。</p>
+          <div className="help-grid">
+            <article><strong>视频描述</strong><p>按“主体 → 动作 → 场景 → 镜头 → 光线 → 声音”书写。H3 会同时生成画面与立体声音，可直接描述对白、环境音和音乐节奏。</p></article>
+            <article><strong>生成模式</strong><p>文字模式不需要素材；首尾帧模式用 1–2 张图片约束开始和结束；全模态参考可组合图片、视频和音频。</p></article>
+            <article><strong>时长</strong><p>固定按 24 FPS 生成，帧数自动对齐 H3 的 17k+5 网格。例如 5 秒会生成 124 帧。更长视频通常更慢、占用更多显存。</p></article>
+            <article><strong>分辨率</strong><p>当前正式映射为 1344×768，宽高必须是 32 的倍数。界面不会将预览缩放尺寸误当成模型输出尺寸。</p></article>
+            <article><strong>采样步数</strong><p>默认 20 步。增加步数不一定持续提高质量，但会近似线性增加生成时间；新手建议保持默认值。</p></article>
+            <article><strong>随机种子</strong><p>相同模型、素材、参数和种子有助于复现结果。当前自动生成种子，任务记录会保存实际值。</p></article>
+            <article><strong>参考素材标签</strong><p>Ref2VA 会按顺序对应 &lt;Picture 1&gt;、&lt;Video 1&gt;、&lt;Audio 1&gt;。需要精确控制时，可在描述中引用这些标签。</p></article>
+            <article><strong>显存与加速</strong><p>24GB 显存和 64GB 内存是建议值，不是兼容保证。加速插件只有通过当前 Runtime 节点与冲突检查后才会标记可用。</p></article>
+          </div>
+          <div className="modal-note"><ShieldCheck/><span><strong>推荐起点</strong><small>5 秒、1344×768、20 步、单一清晰主体。先验证动作与构图，再逐步增加参考素材和复杂镜头。</small></span></div>
+        </section>
+      </div>}
       {historyDialog && <div className="modal-backdrop" role="presentation" onMouseDown={e=>{if(e.target===e.currentTarget)setHistoryDialog(false)}}>
         <section className="modal model-modal" role="dialog" aria-modal="true" aria-labelledby="history-title">
           <div className="modal-head"><div><span className="eyebrow"><Clock3/> 本地任务</span><h2 id="history-title">生成记录</h2></div><button className="icon-button" onClick={()=>setHistoryDialog(false)} aria-label="关闭对话框"><X/></button></div>
@@ -341,6 +431,12 @@ function App() {
           <label htmlFor="output-path">默认保存目录</label>
           <div className="url-row"><input id="output-path" value={outputPath} onChange={e=>{setOutputPath(e.target.value);setPathMessage('')}} /><button onClick={chooseOutputPath}>选择目录</button><button onClick={validatePath}>验证</button></div>
           {pathMessage && <div className={`probe-message ${pathMessage.includes('可写')?'success':'error'}`}><ShieldCheck/><span><strong>{pathMessage}</strong><small>后续任务可单独覆盖此目录。</small></span></div>}
+          <div className="section-divider"><span>软件更新</span></div>
+          <div className="update-row"><div><strong>GitHub Releases</strong><small>当前 v0.6.1 · 包含预览版本 · 下载支持断点续传和 SHA-256 校验</small></div><button onClick={checkUpdate} disabled={checkingUpdate}>{checkingUpdate?'检查中…':'检查更新'}</button></div>
+          {updateCandidate&&!downloadedUpdate&&<div className="update-candidate"><span><strong>{updateCandidate.version}</strong><small>{updateCandidate.fileName}</small></span><button onClick={downloadUpdate}>下载更新</button></div>}
+          {updateProgress&&!downloadedUpdate&&<div className="runtime-progress"><div><span>更新下载</span><strong>{Math.round(updateProgress.progressPercent||0)}%</strong></div><div className="progress"><span style={{width:`${updateProgress.progressPercent||0}%`}}/></div><small>{updateProgress.bytesPerSecond?`${(updateProgress.bytesPerSecond/1024/1024).toFixed(1)} MB/s`:'正在准备'} {updateProgress.etaSeconds?`· 剩余约 ${Math.ceil(updateProgress.etaSeconds/60)} 分钟`:''}</small></div>}
+          {downloadedUpdate&&<button className="primary wide update-install" onClick={launchUpdate}>关闭软件并安装 {downloadedUpdate.version}</button>}
+          {updateMessage&&<div className={`probe-message ${updateMessage.includes('通过')||updateMessage.includes('最新')?'success':updateMessage.includes('发现')?'success':'error'}`}><ShieldCheck/><span><strong>{updateMessage}</strong><small>{downloadedUpdate?`SHA-256 ${downloadedUpdate.sha256}`:'更新只从本项目 GitHub Release 获取'}</small></span></div>}
         </section>
       </div>}
     </div>

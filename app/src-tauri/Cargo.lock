@@ -1829,7 +1829,7 @@ dependencies = [
 
 [[package]]
 name = "langbai-h3-studio"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "rand",
  "reqwest 0.12.28",

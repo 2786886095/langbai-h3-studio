@@ -13,6 +13,22 @@ pub enum UpdateChannel {
     Stable,
     PreRelease,
 }
+
+/// A download-ready update selected from a release feed.  When `sha256` is
+/// absent, the downloader must fetch `sha256_url`, parse the digest, and only
+/// then construct an updater plan.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCandidate {
+    pub version: String,
+    pub file_name: String,
+    pub download_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha256_url: Option<String>,
+    pub pre_release: bool,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Version {
     pub major: u64,
@@ -151,6 +167,90 @@ pub fn select_asset<'a>(
         })
         .ok_or_else(|| UpdateError::AssetNotFound(names.join(", ")))
 }
+
+/// Selects the newest eligible Windows Setup executable and its checksum
+/// source. A release is rejected unless it embeds a valid SHA-256 digest or
+/// publishes a matching `.sha256` asset.
+pub fn select_windows_candidate(
+    current: &str,
+    releases_json: &str,
+    channel: UpdateChannel,
+) -> Result<Option<UpdateCandidate>, UpdateError> {
+    let releases = parse_releases(releases_json)?;
+    let Some(release) = select_update(current, &releases, channel)? else {
+        return Ok(None);
+    };
+    let setup = release
+        .assets
+        .iter()
+        .find(|asset| is_windows_setup_name(&asset.name))
+        .ok_or_else(|| UpdateError::AssetNotFound("Windows x64 setup executable".into()))?;
+    let file_name = safe_file_name(&setup.name)?;
+    let inline_hash = normalize_sha256(&setup.sha256).ok();
+    let sidecar = if inline_hash.is_none() {
+        let names = checksum_asset_names(&file_name);
+        release.assets.iter().find(|asset| {
+            names
+                .iter()
+                .any(|name| asset.name.eq_ignore_ascii_case(name))
+        })
+    } else {
+        None
+    };
+    if inline_hash.is_none() && sidecar.is_none() {
+        return Err(UpdateError::MissingHash(file_name));
+    }
+    Ok(Some(UpdateCandidate {
+        version: release.version.clone(),
+        file_name,
+        download_url: setup.download_url.clone(),
+        sha256: inline_hash,
+        sha256_url: sidecar.map(|asset| asset.download_url.clone()),
+        pre_release: release.pre_release || Version::parse(&release.version)?.is_prerelease(),
+    }))
+}
+
+/// Accept only a single Windows filename. This prevents release metadata from
+/// escaping the updater download directory.
+pub fn safe_file_name(name: &str) -> Result<String, UpdateError> {
+    let invalid = name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains(['/', '\\', ':'])
+        || name.chars().any(char::is_control)
+        || Path::new(name).file_name().and_then(|v| v.to_str()) != Some(name);
+    if invalid {
+        Err(UpdateError::UnsafeFileName(name.into()))
+    } else {
+        Ok(name.to_owned())
+    }
+}
+
+fn is_windows_setup_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".exe")
+        && lower.contains("setup")
+        && (lower.contains("x64") || lower.contains("windows") || lower.contains("win64"))
+}
+
+fn checksum_asset_names(setup_name: &str) -> [String; 2] {
+    let appended = format!("{setup_name}.sha256");
+    let replaced = Path::new(setup_name)
+        .file_stem()
+        .and_then(|v| v.to_str())
+        .map(|stem| format!("{stem}.sha256"))
+        .unwrap_or_default();
+    [appended, replaced]
+}
+
+fn normalize_sha256(value: &str) -> Result<String, UpdateError> {
+    let value = value.trim().to_ascii_lowercase();
+    if value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Ok(value)
+    } else {
+        Err(UpdateError::InvalidHash)
+    }
+}
 pub fn part_path(final_path: &Path) -> Result<PathBuf, UpdateError> {
     let n = final_path
         .file_name()
@@ -200,6 +300,38 @@ pub struct UpdaterPlan {
     pub sha256: String,
     pub restart_executable: PathBuf,
 }
+
+pub fn updater_plan_for_candidate(
+    candidate: &UpdateCandidate,
+    verified_installer: PathBuf,
+    resolved_sha256: &str,
+    restart_executable: PathBuf,
+) -> Result<UpdaterPlan, UpdateError> {
+    safe_file_name(&candidate.file_name)?;
+    if !verified_installer.is_absolute()
+        || !restart_executable.is_absolute()
+        || verified_installer.file_name().and_then(|v| v.to_str()) != Some(&candidate.file_name)
+    {
+        return Err(UpdateError::UnsafePath);
+    }
+    let sha256 = normalize_sha256(resolved_sha256)?;
+    if candidate
+        .sha256
+        .as_ref()
+        .is_some_and(|expected| expected != &sha256)
+    {
+        return Err(UpdateError::HashMismatch {
+            expected: candidate.sha256.clone().unwrap_or_default(),
+            actual: sha256,
+        });
+    }
+    Ok(UpdaterPlan {
+        version: candidate.version.clone(),
+        verified_installer,
+        sha256,
+        restart_executable,
+    })
+}
 /// Called only after both verifications; the independent updater consumes this atomic plan.
 pub fn write_updater_plan(path: &Path, plan: &UpdaterPlan) -> Result<(), UpdateError> {
     if !plan.verified_installer.is_absolute() || !plan.restart_executable.is_absolute() {
@@ -222,10 +354,12 @@ pub enum UpdateError {
     InvalidVersion(String),
     Manifest(String),
     AssetNotFound(String),
+    MissingHash(String),
     InvalidHash,
     HashMismatch { expected: String, actual: String },
     SignatureMismatch,
     UnsafePath,
+    UnsafeFileName(String),
     Io(std::io::Error),
 }
 impl fmt::Display for UpdateError {

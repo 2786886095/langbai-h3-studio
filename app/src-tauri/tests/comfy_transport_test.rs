@@ -114,3 +114,29 @@ fn translates_http_and_timeout_failures_to_chinese() {
     sleeper.join().unwrap();
     assert!(error.contains("超时"));
 }
+
+#[test]
+fn streams_output_to_selected_directory_and_rejects_traversal() {
+    let (url, handle) = server("200 OK", "video-bytes");
+    let transport = ComfyTransport::new(&url, Duration::from_secs(2)).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let saved = tauri::async_runtime::block_on(transport.download_output(
+        "result.mp4",
+        "video",
+        "output",
+        directory.path(),
+    ))
+    .unwrap();
+    assert_eq!(std::fs::read(&saved).unwrap(), b"video-bytes");
+    let request = handle.join().unwrap();
+    assert!(request.starts_with("GET /view?"));
+    assert!(request.contains("filename=result.mp4"));
+    let error = tauri::async_runtime::block_on(transport.download_output(
+        "../escape.mp4",
+        "",
+        "output",
+        directory.path(),
+    ))
+    .unwrap_err();
+    assert!(error.contains("文件名无效"));
+}
