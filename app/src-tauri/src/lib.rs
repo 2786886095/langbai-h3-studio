@@ -441,6 +441,73 @@ async fn comfy_get_history(
         .await
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GenerationPoll {
+    status: String,
+    prompt_id: String,
+    queue_position: Option<usize>,
+    outputs: Vec<comfy::OutputAsset>,
+    error: Option<String>,
+}
+
+#[tauri::command]
+async fn comfy_poll_generation(
+    base_url: String,
+    prompt_id: String,
+) -> Result<GenerationPoll, String> {
+    let transport = comfy_transport::ComfyTransport::new(&base_url, Duration::from_secs(15))?;
+    let history = transport.get_history(&prompt_id).await?;
+    if let Some(entry) = comfy::parse_history(&history, &prompt_id).map_err(|e| e.to_string())? {
+        let status = if entry.error.is_some() {
+            "failed"
+        } else if entry.completed {
+            "completed"
+        } else {
+            "running"
+        };
+        return Ok(GenerationPoll {
+            status: status.into(),
+            prompt_id,
+            queue_position: None,
+            outputs: entry.outputs,
+            error: entry.error,
+        });
+    }
+    let queue = transport.get_queue().await?;
+    let snapshot = comfy::QueueSnapshot::parse(&queue).map_err(|e| e.to_string())?;
+    if snapshot
+        .running
+        .iter()
+        .any(|item| item.prompt_id == prompt_id)
+    {
+        return Ok(GenerationPoll {
+            status: "running".into(),
+            prompt_id,
+            queue_position: None,
+            outputs: Vec::new(),
+            error: None,
+        });
+    }
+    let queue_position = snapshot
+        .pending
+        .iter()
+        .position(|item| item.prompt_id == prompt_id)
+        .map(|index| index + 1);
+    Ok(GenerationPoll {
+        status: if queue_position.is_some() {
+            "queued"
+        } else {
+            "unknown"
+        }
+        .into(),
+        prompt_id,
+        queue_position,
+        outputs: Vec::new(),
+        error: None,
+    })
+}
+
 #[tauri::command]
 async fn comfy_interrupt(base_url: String) -> Result<(), String> {
     comfy_transport::ComfyTransport::new(&base_url, Duration::from_secs(15))?
@@ -778,6 +845,7 @@ pub fn run() {
             comfy_submit_prompt,
             comfy_get_queue,
             comfy_get_history,
+            comfy_poll_generation,
             comfy_interrupt,
             inspect_input_files,
             comfy_upload_input,
