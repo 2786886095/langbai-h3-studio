@@ -31,6 +31,10 @@ type PluginInspection = { package:{manifest:{id:string;name:string;version:strin
 type BenchmarkState = {startedAt:number;mode:string;width:number;height:number;duration:number;steps:number;modelFile:string;gpuName:string;driverVersion:string;vramTotal:number;peakVram:number;ramTotal:number;peakRam:number}
 type BenchmarkReport = {reportId:string;createdAt:number;gpuName:string;vramTotalMb:number;peakVramUsedMb:number;peakRamUsedMb:number;generationMode:string;width:number;height:number;durationSeconds:number;elapsedSeconds:number;outcome:string;enabledPlugins:string[]}
 type ManagedRuntimeStatus = {running:boolean;pid?:number;endpoint?:string;startedAt?:number;exitCode?:number}
+type Engine = 'local'|'cloud'
+type ApiKeyStatus = {configured:boolean;maskedHint?:string}
+type CloudStart = {taskId:string;status?:string}
+type CloudPoll = {status:'queued'|'running'|'completed'|'failed';taskId:string;progress?:number;fileId?:string;error?:string}
 
 const modeContent = {
   text: { title: '文字生成视频', desc: '只需描述画面、镜头和声音，适合从零开始创作。' },
@@ -106,11 +110,18 @@ function App() {
   const [managedStatus, setManagedStatus] = useState<ManagedRuntimeStatus | null>(null)
   const [managedMessage, setManagedMessage] = useState('')
   const [workflowDialog, setWorkflowDialog] = useState(false)
+  const [engine, setEngine] = useState<Engine>('local')
+  const [apiKey, setApiKey] = useState('')
+  const [apiKeyStatus, setApiKeyStatus] = useState<ApiKeyStatus>({configured:false})
+  const [apiKeyMessage, setApiKeyMessage] = useState('')
+  const [cloudResolution, setCloudResolution] = useState<'768P'|'1080P'>('768P')
+  const [cloudTask, setCloudTask] = useState<CloudPoll|null>(null)
   useEffect(() => {
     invoke<SystemProbe>('probe_system').then(value=>{setSystem(value);if(value.gpu&&value.gpu.memoryTotalMb<16000)setMemoryProfile('conservative')}).catch(() => {})
     invoke<RuntimeManifest[]>('runtime_manifests').then(setRuntimeManifests).catch(()=>{})
     invoke<ModelBundle[]>('model_bundles').then(setModelBundles).catch(()=>{})
     invoke<H3PatchManifest>('h3_preview_patch_manifest').then(setH3Patch).catch(()=>{})
+    invoke<ApiKeyStatus>('minimax_api_key_status').then(setApiKeyStatus).catch(()=>{})
     const unlisteners = Promise.all([
       listen<TransferProgress>('runtime-download-progress', event=>setRuntimeProgress(event.payload)),
       listen<TransferProgress>('runtime-install-progress', event=>setRuntimeProgress(event.payload)),
@@ -152,9 +163,19 @@ function App() {
     poll();const timer=setInterval(poll,3000)
     return()=>{stopped=true;clearInterval(timer)}
   },[activePromptId,comfyUrl,outputPath,h3Patch?.commit,pluginLock.plugins])
+  useEffect(()=>{
+    if(engine!=='cloud'||!cloudTask||['completed','failed'].includes(cloudTask.status))return
+    let stopped=false
+    const poll=async()=>{try{const next=await invoke<CloudPoll>('minimax_cloud_poll',{taskId:cloudTask.taskId});if(stopped)return;setCloudTask(next);if(next.status==='completed'&&next.fileId){const saved=await invoke<string>('minimax_cloud_save',{fileId:next.fileId,outputDirectory:outputPath});setJobMessage(`云端生成完成，已保存到 ${saved}`);setGenerating(false)}else if(next.status==='failed'){setJobMessage(`云端生成失败：${next.error||'服务返回失败'}`);setGenerating(false)}}catch(error){if(!stopped){setJobMessage(`读取云端任务失败：${String(error)}`);setGenerating(false)}}}
+    const timer=setInterval(poll,3000);poll();return()=>{stopped=true;clearInterval(timer)}
+  },[cloudTask?.taskId,cloudTask?.status,engine,outputPath])
   const gpu = system?.gpu
   const gpuPercent = gpu ? Math.min(100, Math.round(gpu.memoryUsedMb / gpu.memoryTotalMb * 100)) : 31
   const h3Ready = !!probeResult && (h3Patch?.requiredNodes || []).every(node=>probeResult.h3RelatedNodes.includes(node))
+
+  const selectEngine=(value:Engine)=>{setEngine(value);setEngineDialog(false);setJobMessage('');if(value==='cloud'&&mode==='reference'){setMode('text');setAssets([])}if(value==='cloud'&&!([6,10] as number[]).includes(duration))setDuration(6)}
+  const saveApiKey=async()=>{if(!apiKey.trim()){setApiKeyMessage('请输入 API Key');return}try{await invoke('minimax_api_key_set',{apiKey:apiKey.trim()});setApiKey('');setApiKeyStatus({configured:true});setApiKeyMessage('密钥已加密保存，界面不会回显')}catch(error){setApiKeyMessage(String(error))}}
+  const deleteApiKey=async()=>{try{await invoke('minimax_api_key_delete');setApiKey('');setApiKeyStatus({configured:false});setApiKeyMessage('已删除本机保存的密钥')}catch(error){setApiKeyMessage(String(error))}}
 
   const testComfy = async () => {
     setProbing(true); setProbeError(''); setProbeResult(null)
@@ -205,6 +226,12 @@ function App() {
     if(!prompt.trim()){setJobMessage('请先填写视频描述');setGenerating(false);return}
     if(mode==='frames'&&assets.length===0){setJobMessage('首尾帧模式至少需要选择一张图片');setGenerating(false);return}
     if(mode==='reference'&&assets.length===0){setJobMessage('全模态参考模式至少需要选择一个素材');setGenerating(false);return}
+    if(engine==='cloud'){
+      if(!apiKeyStatus.configured){setJobMessage('请先在运行引擎中设置 MiniMax API Key');setGenerating(false);setEngineDialog(true);return}
+      if(mode==='frames'&&(assets.length<1||assets.some(item=>item.kind!=='image'))){setJobMessage('云端首帧/首尾帧模式需要 1–2 张图片');setGenerating(false);return}
+      if(cloudResolution==='1080P'&&duration!==6){setJobMessage('Hailuo-2.3 的 1080P 当前仅支持 6 秒');setGenerating(false);return}
+      try{setJobMessage('正在安全提交 MiniMax 云端任务…');const started=await invoke<CloudStart>('minimax_cloud_start',{input:{prompt,mode:mode==='text'?'text':assets.length>1?'first_last_frames':'first_frame',model:mode==='frames'&&assets.length>1?'Hailuo-02':'Hailuo-2.3',resolution:cloudResolution,durationSeconds:duration,assets:assets.map(({path,role})=>({path,role}))}});setCloudTask({taskId:started.taskId,status:'queued',progress:0});setJobMessage(`云端任务 ${started.taskId} 已提交`)}catch(error){setJobMessage(String(error));setGenerating(false)}return
+    }
     const workflowMode=mode==='text'?'t2v':mode==='frames'?'fl2va':'ref2va'
     const request = { mode:workflowMode, prompt, width:1344, height:768, durationSeconds:duration, seed:Date.now(), steps, referenceImageSize:'match', outputDirectory:outputPath, baseUrl:comfyUrl, assets:assets.map(({path,mime,kind,role})=>({path,mime,kind,role})) }
     try {
@@ -354,7 +381,7 @@ function App() {
           <div className="mobile-brand"><Menu/><strong>Langbai H3 Studio</strong></div>
           <div className="crumb"><span>创作空间</span><ChevronRight/><strong>新建视频</strong></div>
           <div className="top-actions">
-            <button className="engine" onClick={()=>setEngineDialog(true)}><span className="status-dot"/> 本地模式 <ChevronDown/></button>
+            <button className={`engine ${engine==='cloud'?'cloud':''}`} onClick={()=>setEngineDialog(true)}><span className="status-dot"/> {engine==='local'?'本地 H3':'MiniMax 云端 Hailuo API'} <ChevronDown/></button>
             <button className="icon-button" aria-label="切换主题" onClick={() => setDark(!dark)}>{dark ? <Sun/> : <Moon/>}</button>
             <button className="icon-button" aria-label="更多选项"><MoreHorizontal/></button>
           </div>
@@ -367,7 +394,7 @@ function App() {
           </section>
 
           <div className="mode-tabs" role="tablist">
-            {(Object.keys(modeContent) as Mode[]).map((key, i) => <button key={key} onClick={() => setMode(key)} className={mode === key ? 'selected':''} role="tab" aria-selected={mode === key}>
+            {(Object.keys(modeContent) as Mode[]).filter(key=>engine==='local'||key!=='reference').map((key, i) => <button key={key} onClick={() => {setMode(key);setAssets([])}} className={mode === key ? 'selected':''} role="tab" aria-selected={mode === key}>
               {i === 0 ? <Sparkles/> : i === 1 ? <Image/> : <Video/>}<span><strong>{modeContent[key].title}</strong><small>{modeContent[key].desc}</small></span>{mode === key && <span className="check">✓</span>}
             </button>)}
           </div>
@@ -383,32 +410,46 @@ function App() {
 
               <div className="setting-grid">
                 <div className="field"><label>画面比例</label><button className="select"><span><span className="ratio-icon wide"/>16:9 · 横屏</span><ChevronDown/></button></div>
-                <div className="field"><label>视频时长</label><div className="segmented">{[5,8,10,15].map(n=><button key={n} onClick={()=>setDuration(n)} className={duration===n?'active':''}>{n} 秒</button>)}</div></div>
-                <div className="field"><label>生成质量</label><button className="select"><span><ShieldCheck/> 标准 · 768p</span><ChevronDown/></button></div>
+                <div className="field"><label>视频时长</label><div className={`segmented ${engine==='cloud'?'two-options':''}`}>{(engine==='cloud'?(cloudResolution==='1080P'?[6]:[6,10]):[5,8,10,15]).map(n=><button key={n} onClick={()=>setDuration(n)} className={duration===n?'active':''}>{n} 秒</button>)}</div></div>
+                <div className="field"><label>生成质量</label>{engine==='cloud'?<div className="segmented two-options">{(['768P','1080P'] as const).map(value=><button key={value} onClick={()=>{setCloudResolution(value);if(value==='1080P')setDuration(6)}} className={cloudResolution===value?'active':''}>{value}</button>)}</div>:<button className="select"><span><ShieldCheck/> 标准 · 768p</span><ChevronDown/></button>}</div>
                 <div className="field"><label>随机种子 <Info/></label><button className="select"><span>自动随机</span><RotateCcw/></button></div>
               </div>
 
-              <button className="advanced-toggle" onClick={()=>setAdvanced(!advanced)}><span><Settings/> 高级设置 <small>采样、卸载与加速选项</small></span><ChevronDown className={advanced?'rotated':''}/></button>
-              {advanced && <div className="advanced-panel"><div><label>采样步数 <b>{steps}</b></label><input type="range" min="12" max="50" value={steps} onChange={event=>setSteps(Number(event.target.value))}/></div><div><label>显存策略</label><button className="select" onClick={()=>setEngineDialog(true)}><span>{memoryProfile==='auto'?'自动动态显存':memoryProfile==='conservative'?'保守低显存':'最小显存'}</span><ChevronDown/></button></div><div><label>加速方案</label><button className="select" onClick={openPlugins}><span><Zap/> {Object.entries(pluginLock.plugins).filter(([,item])=>item.enabled).length?`${Object.entries(pluginLock.plugins).filter(([,item])=>item.enabled).length} 个插件已启用`:'使用 ComfyUI 原生优化'}</span><ChevronDown/></button></div></div>}
+              {engine==='local'&&<><button className="advanced-toggle" onClick={()=>setAdvanced(!advanced)}><span><Settings/> 高级设置 <small>采样、卸载与加速选项</small></span><ChevronDown className={advanced?'rotated':''}/></button>
+              {advanced && <div className="advanced-panel"><div><label>采样步数 <b>{steps}</b></label><input type="range" min="12" max="50" value={steps} onChange={event=>setSteps(Number(event.target.value))}/></div><div><label>显存策略</label><button className="select" onClick={()=>setEngineDialog(true)}><span>{memoryProfile==='auto'?'自动动态显存':memoryProfile==='conservative'?'保守低显存':'最小显存'}</span><ChevronDown/></button></div><div><label>加速方案</label><button className="select" onClick={openPlugins}><span><Zap/> {Object.entries(pluginLock.plugins).filter(([,item])=>item.enabled).length?`${Object.entries(pluginLock.plugins).filter(([,item])=>item.enabled).length} 个插件已启用`:'使用 ComfyUI 原生优化'}</span><ChevronDown/></button></div></div>}</>}
             </section>
 
             <aside className="summary-card">
               <div className="preview"><div className="preview-art"><div className="orbit one"/><div className="orbit two"/><Aperture/><span>生成预览将在这里显示</span></div><button className="expand">↗</button></div>
-              <div className="summary-body"><h2>生成准备</h2><div className="summary-row"><span><Cpu/> 运行方案</span><strong>{memoryProfile==='auto'?'动态显存':'低显存卸载'}</strong></div><div className="summary-row"><span><HardDrive/> 峰值显存</span><strong>首次生成后记录</strong></div><div className="summary-row"><span><Clock3/> 预计耗时</span><strong>由本机实测生成</strong></div><div className="summary-row"><span><FolderOpen/> 保存到</span><button onClick={openSettings}>{outputPath} <ChevronRight/></button></div>
-                <div className="fit-notice"><ShieldCheck/><span><strong>{gpu&&gpu.memoryTotalMb>=24000?'达到建议显存':'需要兼容性实测'}</strong><small>{gpu?`${(gpu.memoryTotalMb/1024).toFixed(0)}GB 显存 · 建议 24GB 显存与 64GB 内存`:'未检测到 NVIDIA 显卡信息'}</small></span></div>
-                <button className="generate" onClick={createGenerationJob} disabled={generating||!h3Ready}>{generating ? <><span className="spinner"/> {generationPoll?.status==='running'?'正在生成视频…':generationPoll?.status==='queued'?'正在排队…':'正在提交素材…'}</> : <><Play/> {h3Ready?'开始生成视频':'请先连接 H3 运行环境'}</>}</button><p className="queue-note">{generationPoll?.status==='failed'?`生成失败：${generationPoll.error||'ComfyUI 执行错误'}`:jobMessage || (h3Ready?'运行环境已通过 H3 节点校验':'在“运行环境”中安装或连接 ComfyUI，并验证 H3 必需节点')}</p>
+              <div className="summary-body"><h2>生成准备</h2><div className="summary-row"><span><Cpu/> 运行方案</span><strong>{engine==='cloud'?'MiniMax 云端':memoryProfile==='auto'?'动态显存':'低显存卸载'}</strong></div><div className="summary-row"><span><HardDrive/> {engine==='cloud'?'云端模型':'峰值显存'}</span><strong>{engine==='cloud'?(mode==='frames'&&assets.length>1?'Hailuo-02':'Hailuo-2.3'):'首次生成后记录'}</strong></div><div className="summary-row"><span><Clock3/> {engine==='cloud'?'规格':'预计耗时'}</span><strong>{engine==='cloud'?`${cloudResolution} · ${duration} 秒`:'由本机实测生成'}</strong></div><div className="summary-row"><span><FolderOpen/> 保存到</span><button onClick={openSettings}>{outputPath} <ChevronRight/></button></div>
+                <div className="fit-notice"><ShieldCheck/><span><strong>{engine==='cloud'?(apiKeyStatus.configured?'云端密钥已配置':'需要设置 API Key'):gpu&&gpu.memoryTotalMb>=24000?'达到建议显存':'需要兼容性实测'}</strong><small>{engine==='cloud'?'使用官方付费 API，不占用本机显存；费用由 MiniMax 账户结算':gpu?`${(gpu.memoryTotalMb/1024).toFixed(0)}GB 显存 · 建议 24GB 显存与 64GB 内存`:'未检测到 NVIDIA 显卡信息'}</small></span></div>
+                <button className="generate" onClick={createGenerationJob} disabled={generating||(engine==='local'&&!h3Ready)}>{generating ? <><span className="spinner"/> {engine==='cloud'?(cloudTask?.status==='running'?'云端生成中…':'云端排队中…'):generationPoll?.status==='running'?'正在生成视频…':generationPoll?.status==='queued'?'正在排队…':'正在提交素材…'}</> : <><Play/> {engine==='cloud'?'使用 Hailuo API 生成':h3Ready?'开始生成视频':'请先连接 H3 运行环境'}</>}</button><p className="queue-note">{jobMessage || (engine==='cloud'?'云端按官方 API 实际用量计费，生成结果仍保存到你的目录':h3Ready?'运行环境已通过 H3 节点校验':'在“运行环境”中安装或连接 ComfyUI，并验证 H3 必需节点')}</p>
               </div>
             </aside>
           </div>
 
-          <section className="download-card">
+          {engine==='local'&&<section className="download-card">
             <div className="model-icon"><Download/></div><div className="download-info"><div><strong>MiniMax-H3 单卡优化模型</strong><span className="tag">官方工作流</span></div><p>每套约 39.6 GiB（42.5 GB）· 建议 24GB 显存和 64GB 内存 · 支持断点续传与 SHA-256 校验</p><small>模型不会自动下载。请在模型中心选择文生视频或全模态参考版本，并确认模型许可证。</small></div><button onClick={()=>setModelDialog(true)}>打开模型中心</button>
-          </section>
+          </section>}
         </div>
       </main>
       {engineDialog && <div className="modal-backdrop" role="presentation" onMouseDown={e=>{if(e.target===e.currentTarget)setEngineDialog(false)}}>
         <section className="modal" role="dialog" aria-modal="true" aria-labelledby="engine-title">
-          <div className="modal-head"><div><span className="eyebrow"><Cpu/> 运行环境</span><h2 id="engine-title">连接已有 ComfyUI</h2></div><button className="icon-button" onClick={()=>setEngineDialog(false)} aria-label="关闭对话框"><X/></button></div>
+          <div className="modal-head"><div><span className="eyebrow"><Cpu/> 生成引擎</span><h2 id="engine-title">选择视频生成方式</h2></div><button className="icon-button" onClick={()=>setEngineDialog(false)} aria-label="关闭对话框"><X/></button></div>
+          <div className="engine-choices">
+            <button className={engine==='local'?'selected':''} onClick={()=>setEngine('local')}><Cpu/><span><strong>本地 MiniMax-H3</strong><small>模型保存在电脑中，不产生 API 费用；需要 NVIDIA 显卡及较大内存。</small></span>{engine==='local'&&<b>已选择</b>}</button>
+            <button className={engine==='cloud'?'selected':''} onClick={()=>{setEngine('cloud');if(mode==='reference'){setMode('text');setAssets([])}if(![6,10].includes(duration))setDuration(6)}}><Sparkles/><span><strong>MiniMax 云端 Hailuo API</strong><small>无需下载模型和占用显存；官方服务按实际用量付费。</small></span>{engine==='cloud'&&<b>已选择</b>}</button>
+          </div>
+          {engine==='cloud'&&<div className="cloud-engine-panel">
+            <div className="cloud-status"><ShieldCheck/><span><strong>{apiKeyStatus.configured?'API Key 已安全保存':'尚未设置 API Key'}</strong><small>密钥只提交给本机后端安全存储，保存后不会在界面回显。</small></span></div>
+            <label htmlFor="minimax-key">MiniMax API Key</label>
+            <div className="url-row"><input id="minimax-key" type="password" autoComplete="off" placeholder={apiKeyStatus.configured?'输入新密钥可替换当前密钥':'请输入 API Key'} value={apiKey} onChange={e=>setApiKey(e.target.value)}/><button onClick={saveApiKey}>保存密钥</button>{apiKeyStatus.configured&&<button className="danger-button" onClick={deleteApiKey}>删除</button>}</div>
+            {apiKeyMessage&&<div className={`probe-message ${apiKeyMessage.includes('已')?'success':'error'}`}><Info/><span><strong>{apiKeyMessage}</strong></span></div>}
+            <div className="cloud-model-guide"><article><strong>Hailuo-2.3</strong><small>文字生视频、首帧生视频 · 768P 支持 6/10 秒 · 1080P 支持 6 秒</small></article><article><strong>Hailuo-02</strong><small>首尾帧生视频 · 用两张图片明确控制开头和结尾</small></article></div>
+            <div className="modal-note warning"><Info/><span><strong>云端与本地模型不是同一个运行方案</strong><small>云端使用 MiniMax 官方 Hailuo API 和账户额度，能力、价格与可用性以官方控制台为准；本地 H3 可离线运行并支持社区加速插件。</small></span></div>
+            <button className="primary wide" onClick={()=>selectEngine('cloud')}>使用云端 Hailuo API</button>
+          </div>}
+          <div className={engine==='local'?'engine-local':'engine-local hidden'}>
           <p>新手可以一键安装独立运行环境；已有 ComfyUI 用户也可以直接连接本机实例。</p>
           <div className="runtime-options">{runtimeManifests.map((item,index)=><article key={item.version}><div className="model-icon"><Cpu/></div><div><strong>{index===0?'NVIDIA 新版运行环境':'NVIDIA 兼容运行环境'}</strong><small>{item.version} · 官方 ComfyUI v0.30.0 · 约 {index===0?'2.11':'2.05'} GB</small><span>{index===0?'适合 RTX 20 系及更新显卡':'CUDA 12.6，适合旧驱动或较老显卡'}</span></div><button onClick={()=>installRuntime(index===0?'nvidia':'nvidia-cu126')} disabled={!!installingRuntime}>{installingRuntime=== (index===0?'nvidia':'nvidia-cu126')?'安装中…':'下载并安装'}</button></article>)}</div>
           {runtimeProgress && <div className="runtime-progress"><div><span>{runtimeProgress.phase}</span><strong>{Math.round(runtimeProgress.progressPercent || 0)}%</strong></div><div className="progress"><span style={{width:`${runtimeProgress.progressPercent || 0}%`}}/></div><small>{runtimeProgress.bytesPerSecond?`${(runtimeProgress.bytesPerSecond/1024/1024).toFixed(1)} MB/s`:runtimeProgress.currentFile||'正在准备'} {runtimeProgress.etaSeconds?`· 剩余约 ${Math.ceil(runtimeProgress.etaSeconds/60)} 分钟`:''}</small></div>}
@@ -427,6 +468,8 @@ function App() {
           {h3PatchProgress && installingH3Patch && <div className="runtime-progress"><div><span>下载 H3 补丁</span><strong>{Math.round(h3PatchProgress.progressPercent||0)}%</strong></div><div className="progress"><span style={{width:`${h3PatchProgress.progressPercent||0}%`}}/></div><small>{h3PatchProgress.bytesPerSecond?`${(h3PatchProgress.bytesPerSecond/1024/1024).toFixed(1)} MB/s`:'正在准备'} {h3PatchProgress.etaSeconds?`· 剩余约 ${Math.ceil(h3PatchProgress.etaSeconds/60)} 分钟`:''}</small></div>}
           {h3PatchMessage && <div className={`probe-message ${h3PatchMessage.includes('已安装')?'success':'error'}`}><ShieldCheck/><span><strong>{h3PatchMessage.includes('已安装')?'补丁安装完成':'补丁安装未完成'}</strong><small>{h3PatchMessage}</small></span></div>}
           <div className="modal-note"><ShieldCheck/><span><strong>本地连接保护</strong><small>MVP 仅探测 127.0.0.1、localhost 或 ::1，避免意外访问不可信远端服务。</small></span></div>
+          <button className="primary wide" onClick={()=>selectEngine('local')}>使用本地 H3</button>
+          </div>
         </section>
       </div>}
       {modelDialog && <div className="modal-backdrop" role="presentation" onMouseDown={e=>{if(e.target===e.currentTarget)setModelDialog(false)}}>

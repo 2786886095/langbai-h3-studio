@@ -1,6 +1,6 @@
 [package]
 name = "langbai-h3-studio"
-version = "0.6.3"
+version = "0.7.0"
 description = "Langbai H3 Studio"
 authors = ["Langbai H3 Studio contributors"]
 license = "Apache-2.0"
@@ -28,6 +28,8 @@ sevenz-rust = { version = "0.6.1", default-features = false }
 tauri-plugin-dialog = "2"
 tokio = { version = "1", features = ["fs", "io-util"] }
 tokio-util = { version = "0.7", features = ["io"] }
+keyring = { version = "3", default-features = false, features = ["windows-native"] }
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3"

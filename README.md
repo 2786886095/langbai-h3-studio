@@ -1,5 +1,18 @@
 # Langbai H3 Studio
 
+## v0.7.0 云端 Hailuo API
+
+除本地 MiniMax-H3 / ComfyUI 外，Studio 现已提供独立的 **MiniMax 云端 Hailuo API** 模式：
+
+- Hailuo-2.3：文字或首帧生成视频
+- Hailuo-02：首尾帧生成视频
+- API Key 保存到 Windows Credential Manager，应用界面不回显
+- 云端任务自动轮询并将结果保存到用户选择的本地目录
+
+云端 Hailuo API 与开源 MiniMax-H3 是两套不同的执行引擎。云端服务按 MiniMax
+账户实际用量计费，本地 H3 仍由用户显卡和 ComfyUI 执行。详见
+[云端 API 接入规范](docs/MINIMAX_CLOUD_API.md)。
+
 面向 Windows NVIDIA 单卡用户的 MiniMax-H3 视频生成桌面软件，以清晰的创作表单和智能预设替代 ComfyUI 节点画布，并保留本地模型、外接 ComfyUI、MiniMax API 与社区加速插件扩展能力。
 
 > 当前阶段：Windows MVP 开发版。已提供 Tauri 桌面壳、硬件检测、托管 ComfyUI 安装与进程管理、H3 优化模型真实断点下载、Windows 原生素材选择与流式上传、输出目录验证、本机 ComfyUI 能力探测和 SQLite 任务记录；官方 UI Graph 到可提交 API Graph 的可靠转换及完整生成执行继续开发中。

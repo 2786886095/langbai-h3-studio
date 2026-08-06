@@ -16,6 +16,7 @@ mod download;
 mod h3_patch;
 mod h3_workflow;
 mod job_store;
+mod minimax_api;
 mod model_bundle;
 mod model_store;
 mod plugin_manager;
@@ -1432,7 +1433,19 @@ pub fn run() {
             comfy_upload_input,
             job_store::create_job,
             job_store::list_jobs,
-            job_store::update_job
+            job_store::update_job,
+            minimax_api::minimax_set_api_key,
+            minimax_api::minimax_has_api_key,
+            minimax_api::minimax_delete_api_key,
+            minimax_api::minimax_create_video_task,
+            minimax_api::minimax_query_video_task,
+            minimax_api::minimax_fetch_video,
+            minimax_api::minimax_api_key_status,
+            minimax_api::minimax_api_key_set,
+            minimax_api::minimax_api_key_delete,
+            minimax_api::minimax_cloud_start,
+            minimax_api::minimax_cloud_poll,
+            minimax_api::minimax_cloud_save
         ])
         .manage(ManagedRuntimeState::default())
         .run(tauri::generate_context!())
