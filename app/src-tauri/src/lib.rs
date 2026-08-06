@@ -9,6 +9,7 @@ use sysinfo::System;
 use tauri::Emitter;
 use url::Url;
 
+mod autodl_deploy;
 mod autodl_remote;
 mod benchmark;
 mod comfy;
@@ -1433,6 +1434,7 @@ pub fn run() {
             ssh_tunnel::ssh_tunnel_status,
             ssh_tunnel::ssh_tunnel_stop,
             autodl_remote::autodl_remote_probe,
+            autodl_deploy::autodl_deploy_preflight,
             comfy_submit_prompt,
             comfy_get_queue,
             comfy_get_history,

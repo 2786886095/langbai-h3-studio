@@ -39,6 +39,7 @@ type ManagedNodeItem = {id:string;name:string;repository:string;commit:string;li
 type ManagedNodeState = {id:string;installed:boolean;installedCommit?:string;restartRequired:boolean;verified:boolean;category:string;evidenceLevel:string}
 type SshTunnelStatus = {running:boolean;pid?:number;endpoint?:string;localPort?:number;startedAt?:number;exitCode?:number;phase:'starting'|'ready'|'stopped'|'failed';errorCode?:string;error?:string}
 type AutoDlProbe = {os:string;gpus:Array<{name:string;vramMib?:number;driverVersion?:string}>;totalVramMib:number;ramTotalMib?:number;python?:string;disks:Array<{availableBytes?:number;mountPoint:string}>;comfyuiCandidates:Array<{path:string;h3SourceFiles:Array<{relativePath:string;present:boolean}>;modelVariants:Array<{id:string;files:Array<{relativePath:string;expectedSizeBytes:number;present:boolean;sizeBytes:number}>}>;kjH3SageAttentionPresent:boolean}>}
+type AutoDlDeployPlan = {deploymentId:string;targetPath:string;remoteComfyPort:number;requiredBytes:number;availableBytes:number;downloadFiles:Array<{relativePath:string;size:number;sha256:string;url:string}>;rollbackSupported:boolean;warnings:string[]}
 
 const modeContent = {
   text: { title: '文字生成视频', desc: '只需描述画面、镜头和声音，适合从零开始创作。' },
@@ -143,6 +144,9 @@ function App() {
   const [autodlSshCommand, setAutodlSshCommand] = useState('')
   const [autoDlProbe, setAutoDlProbe] = useState<AutoDlProbe|null>(null)
   const [autoDlProbeBusy, setAutoDlProbeBusy] = useState(false)
+  const [autoDlVariants, setAutoDlVariants] = useState<Array<'fl2va'|'ref2va'>>(['fl2va'])
+  const [autoDlDeployPlan, setAutoDlDeployPlan] = useState<AutoDlDeployPlan|null>(null)
+  const [autoDlPlanBusy, setAutoDlPlanBusy] = useState(false)
   useEffect(() => {
     invoke<SystemProbe>('probe_system').then(value=>{setSystem(value);if(value.gpu&&value.gpu.memoryTotalMb<10000){setMemoryProfile('eight_gb');setLocalResolution('608x352')}else if(value.gpu&&value.gpu.memoryTotalMb<16000)setMemoryProfile('conservative')}).catch(() => {})
     invoke<RuntimeManifest[]>('runtime_manifests').then(setRuntimeManifests).catch(()=>{})
@@ -385,6 +389,14 @@ function App() {
     catch(error){setSshMessage(String(error))}finally{setAutoDlProbeBusy(false)}
   }
 
+  const preflightAutoDl = async () => {
+    if(!autoDlProbe||autoDlVariants.length===0)return
+    const availableBytes=Math.max(0,...autoDlProbe.disks.map(d=>d.availableBytes||0))
+    setAutoDlPlanBusy(true);setAutoDlDeployPlan(null);setSshMessage('正在计算隔离部署目录、共享模型和磁盘需求…')
+    try{const value=await invoke<AutoDlDeployPlan>('autodl_deploy_preflight',{input:{connection:{host:sshHost,user:sshUser,port:sshPort,identityFile:sshIdentity,knownHostsFile:sshKnownHosts,remoteComfyPort:sshRemotePort},target:'studio_managed',variants:autoDlVariants,acceleration:'native',modelStrategy:'reuse_then_download_missing',remoteComfyPort:sshRemotePort,availableBytes}});setAutoDlDeployPlan(value);setSshMessage('AutoDL 隔离部署计划已生成')}
+    catch(error){setSshMessage(String(error))}finally{setAutoDlPlanBusy(false)}
+  }
+
   const stopSshTunnel = async () => {
     try{const value=await invoke<SshTunnelStatus>('ssh_tunnel_stop');setSshStatus(value);setSshMessage('远程 SSH 隧道已断开');setProbeResult(null)}catch(error){setSshMessage(String(error))}
   }
@@ -574,6 +586,7 @@ function App() {
           <label>known_hosts</label><div className="url-row"><input value={sshKnownHosts} readOnly placeholder="选择已从租用商核验指纹的 known_hosts"/><button onClick={()=>chooseSshFile('knownHosts')}>选择</button></div>
           <button className="primary wide remote-probe-button" onClick={probeAutoDl} disabled={autoDlProbeBusy||!sshHost||!sshIdentity||!sshKnownHosts}>{autoDlProbeBusy?'正在检查远端环境…':'检查 AutoDL H3 环境'}</button>
           {autoDlProbe&&<div className="remote-probe-result"><div className="remote-summary"><strong>{autoDlProbe.gpus.map(gpu=>gpu.name).join('、')||'未检测到 NVIDIA GPU'}</strong><small>{autoDlProbe.os} · 显存 {(autoDlProbe.totalVramMib/1024).toFixed(1)}GB · 内存 {autoDlProbe.ramTotalMib?(autoDlProbe.ramTotalMib/1024).toFixed(0)+'GB':'未知'} · {autoDlProbe.python||'未找到 Python'}</small></div>{autoDlProbe.comfyuiCandidates.length===0?<div className="empty-result">常见路径下未发现 ComfyUI</div>:autoDlProbe.comfyuiCandidates.map(candidate=>{const sourcesReady=candidate.h3SourceFiles.every(file=>file.present);return <article key={candidate.path}><div><strong>{candidate.path}</strong><small>{sourcesReady?'H3 源码完整':'H3 源码不完整'} · {candidate.kjH3SageAttentionPresent?'KJ H3 Sage 已安装':'未检测到 KJ H3 Sage'}</small></div>{candidate.modelVariants.map(variant=>{const ready=variant.files.every(file=>file.present&&file.sizeBytes===file.expectedSizeBytes);return <span key={variant.id} className={ready?'ready':'missing'}>{variant.id.toUpperCase()} {ready?'模型完整':'模型缺失或大小不符'}</span>})}</article>})}</div>}
+          {autoDlProbe&&<div className="autodl-preflight"><div className="section-divider"><span>??????</span></div><p>Studio ????????????????????????????? VAE?</p><div className="autodl-variant-row"><label><input type="checkbox" checked={autoDlVariants.includes('fl2va')} onChange={e=>setAutoDlVariants(v=>e.target.checked?[...new Set([...v,'fl2va' as const])]:v.filter(x=>x!=='fl2va'))}/> ?????? FL2VA</label><label><input type="checkbox" checked={autoDlVariants.includes('ref2va')} onChange={e=>setAutoDlVariants(v=>e.target.checked?[...new Set([...v,'ref2va' as const])]:v.filter(x=>x!=='ref2va'))}/> ????? Ref2VA</label></div><button className="primary wide" onClick={preflightAutoDl} disabled={autoDlPlanBusy||autoDlVariants.length===0}>{autoDlPlanBusy?'????????????':'????????'}</button>{autoDlDeployPlan&&<div className="deploy-plan-card"><div><strong>{autoDlDeployPlan.targetPath}</strong><small>???? {autoDlDeployPlan.deploymentId} ? ???? {autoDlDeployPlan.rollbackSupported?'???':'???'}</small></div><div className="deploy-metrics"><span><b>{(autoDlDeployPlan.requiredBytes/1024/1024/1024).toFixed(1)} GB</b>????</span><span><b>{autoDlDeployPlan.downloadFiles.length}</b>?????</span><span><b>{(autoDlDeployPlan.availableBytes/1024/1024/1024).toFixed(0)} GB</b>????</span></div><small className="deploy-boundary">?????????????????????????????? SHA-256?</small></div>}</div>}
           <div className="runtime-actions"><button onClick={startSshTunnel} disabled={sshBusy||sshStatus?.running||!sshHost||!sshIdentity||!sshKnownHosts}>{sshBusy?'连接中…':'连接远程 GPU'}</button><button onClick={stopSshTunnel} disabled={!sshStatus?.running}>断开隧道</button></div>
           {sshMessage&&<div className={`probe-message ${sshStatus?.running||sshMessage.includes('已断开')?'success':'error'}`}><ShieldCheck/><span><strong>{sshMessage}</strong><small>{sshStatus?.running?`SSH PID ${sshStatus.pid} · 远端算力，本机保存结果`:'严格校验主机密钥；不会自动信任未知服务器'}</small></span></div>}
           <div className="modal-note warning"><Info/><span><strong>远端安全前置条件</strong><small>远端 ComfyUI 只监听 127.0.0.1，云服务器防火墙只开放 SSH；首次连接前请从租用商控制台核对主机指纹并准备 known_hosts。</small></span></div>
