@@ -5,7 +5,7 @@ import { open } from '@tauri-apps/plugin-dialog'
 import {
   Aperture, Boxes, ChevronDown, ChevronRight, CircleHelp, Clock3, Cpu,
   Download, FolderOpen, HardDrive, Image, Info, LayoutGrid, Menu,
-  Moon, MoreHorizontal, Play, RotateCcw, Settings, ShieldCheck,
+  Moon, Play, RotateCcw, Settings, ShieldCheck,
   Sparkles, Sun, Upload, Video, WandSparkles, X, Zap
 } from 'lucide-react'
 import './App.css'
@@ -14,7 +14,7 @@ type Mode = 'text' | 'frames' | 'reference'
 type SystemProbe = { cpuName:string; cpuThreads:number; memoryTotalMb:number; memoryUsedMb:number; cudaAvailable:boolean; gpu?:{name:string;driverVersion:string;memoryTotalMb:number;memoryUsedMb:number;temperatureC?:number} }
 type ComfyProbe = { reachable:boolean; baseUrl:string; nodeCount:number; h3RelatedNodes:string[]; latencyMs:number; message:string }
 type ModelScan = { root:string; maxDepth:number; models:Array<{directory:string;modelType:string;integrity:string;totalSizeBytes:number;files:Array<{path:string;sizeBytes:number;kind:string}>;warnings:string[]}>; warnings:string[] }
-type JobRecord = { id:string;name:string;status:string;stage:string;progress:number;backendId:string;outputPath?:string;errorSummary?:string;createdAt:number;updatedAt:number }
+type JobRecord = { id:string;name:string;status:string;stage:string;progress:number;requestJson:string;backendId:string;outputPath?:string;errorSummary?:string;createdAt:number;updatedAt:number }
 type RuntimeManifest = { version:string;url:string;sha256:string;archiveFormat:string;expectedFiles:string[] }
 type TransferProgress = { phase:string;downloadedBytes?:number;totalBytes?:number;progressPercent?:number;bytesPerSecond?:number;etaSeconds?:number;currentFile?:string }
 type ModelBundle = { id:string;name:string;variant:string;revision:string;license:string;licenseUrl:string;recommendedVramGb:number;recommendedRamGb:number;files:Array<{relativePath:string;size:number;sha256:string}> }
@@ -48,6 +48,7 @@ const modeContent = {
 function readDraft(): Partial<{prompt:string;duration:number;steps:number;mode:Mode}> {
   try{return JSON.parse(localStorage.getItem('langbai-h3-draft')||'{}')}catch{return {}}
 }
+function readPreference(key:string,fallback:string):string { try{return localStorage.getItem(key)||fallback}catch{return fallback} }
 
 function App() {
   const initialDraft = useRef(readDraft()).current
@@ -75,7 +76,7 @@ function App() {
   const [jobs, setJobs] = useState<JobRecord[]>([])
   const [historyLoading, setHistoryLoading] = useState(false)
   const [settingsDialog, setSettingsDialog] = useState(false)
-  const [outputPath, setOutputPath] = useState('D:\\H3作品')
+  const [outputPath, setOutputPath] = useState(()=>readPreference('langbai-h3-output-path','D:\\H3作品'))
   const [pathMessage, setPathMessage] = useState('')
   const [runtimeManifests, setRuntimeManifests] = useState<RuntimeManifest[]>([])
   const [runtimeProgress, setRuntimeProgress] = useState<TransferProgress | null>(null)
@@ -95,6 +96,7 @@ function App() {
   const [h3PatchMessage, setH3PatchMessage] = useState('')
   const [h3PatchProgress, setH3PatchProgress] = useState<TransferProgress | null>(null)
   const [activePromptId, setActivePromptId] = useState('')
+  const [activeJobId, setActiveJobId] = useState('')
   const [generationPoll, setGenerationPoll] = useState<GenerationPoll | null>(null)
   const [checkingUpdate, setCheckingUpdate] = useState(false)
   const [updateCandidate, setUpdateCandidate] = useState<UpdateCandidate | null>(null)
@@ -134,6 +136,7 @@ function App() {
   const [sshStatus, setSshStatus] = useState<SshTunnelStatus|null>(null)
   const [sshMessage, setSshMessage] = useState('')
   const [sshBusy, setSshBusy] = useState(false)
+  const [autodlSshCommand, setAutodlSshCommand] = useState('')
   useEffect(() => {
     invoke<SystemProbe>('probe_system').then(value=>{setSystem(value);if(value.gpu&&value.gpu.memoryTotalMb<10000){setMemoryProfile('eight_gb');setLocalResolution('608x352')}else if(value.gpu&&value.gpu.memoryTotalMb<16000)setMemoryProfile('conservative')}).catch(() => {})
     invoke<RuntimeManifest[]>('runtime_manifests').then(setRuntimeManifests).catch(()=>{})
@@ -152,6 +155,7 @@ function App() {
     return ()=>{unlisteners.then(items=>items.forEach(fn=>fn()))}
   }, [])
   useEffect(()=>{try{localStorage.setItem('langbai-h3-draft',JSON.stringify({prompt,duration,steps,mode}))}catch{}},[prompt,duration,steps,mode])
+  useEffect(()=>{try{localStorage.setItem('langbai-h3-output-path',outputPath)}catch{}},[outputPath])
   useEffect(()=>{
     if(!activePromptId) return
     let stopped=false
@@ -162,32 +166,35 @@ function App() {
         const value=await invoke<GenerationPoll>('comfy_poll_generation',{baseUrl:comfyUrl,promptId:activePromptId})
         if(stopped) return
         setGenerationPoll(value)
+        if(activeJobId&&['queued','running'].includes(value.status))await invoke('update_job',{patch:{id:activeJobId,status:value.status,stage:value.status==='running'?'正在生成':'等待 ComfyUI',progress:value.status==='running'?0.5:0.1,planJson:null,outputPath:null,errorSummary:null}}).catch(()=>{})
         if(value.status==='completed'){
           const saved:string[]=[]
           for(const asset of value.outputs.filter(item=>item.mediaType==='video')){
             saved.push(await invoke<string>('comfy_save_output',{baseUrl:comfyUrl,asset,outputDirectory:outputPath}))
           }
           const sample=benchmarkRef.current
-          if(sample)await invoke('benchmark_save',{report:{schemaVersion:1,reportId:value.promptId,createdAt:Math.floor(Date.now()/1000),studioVersion:'0.6.3',gpuName:sample.gpuName||'未检测到',driverVersion:sample.driverVersion,vramTotalMb:sample.vramTotal,peakVramUsedMb:sample.peakVram,ramTotalMb:sample.ramTotal,peakRamUsedMb:sample.peakRam,runtimeVersion:comfyUrl,h3PatchCommit:h3Patch?.commit||'',generationMode:sample.mode,width:sample.width,height:sample.height,durationSeconds:sample.duration,steps:sample.steps,modelFile:sample.modelFile,enabledPlugins:Object.entries(pluginLock.plugins).filter(([,item])=>item.enabled).map(([id])=>id),elapsedSeconds:(Date.now()-sample.startedAt)/1000,outcome:'completed',errorSummary:'',outputFile:saved[0]||''}}).catch(()=>{})
+          if(sample)await invoke('benchmark_save',{report:{schemaVersion:1,reportId:value.promptId,createdAt:Math.floor(Date.now()/1000),studioVersion:'0.8.1',gpuName:sample.gpuName||'未检测到',driverVersion:sample.driverVersion,vramTotalMb:sample.vramTotal,peakVramUsedMb:sample.peakVram,ramTotalMb:sample.ramTotal,peakRamUsedMb:sample.peakRam,runtimeVersion:comfyUrl,h3PatchCommit:h3Patch?.commit||'',generationMode:sample.mode,width:sample.width,height:sample.height,durationSeconds:sample.duration,steps:sample.steps,modelFile:sample.modelFile,enabledPlugins:Object.entries(pluginLock.plugins).filter(([,item])=>item.enabled).map(([id])=>id),elapsedSeconds:(Date.now()-sample.startedAt)/1000,outcome:'completed',errorSummary:'',outputFile:saved[0]||''}}).catch(()=>{})
           benchmarkRef.current=null
+          if(activeJobId)await invoke('update_job',{patch:{id:activeJobId,status:'completed',stage:'已完成',progress:1,planJson:null,outputPath:saved[0]||null,errorSummary:null}}).catch(()=>{})
           setJobMessage(saved.length?`生成完成，已保存到 ${saved.join('、')}`:'生成完成，但历史记录中没有视频输出')
-          setActivePromptId('');setGenerating(false)
+          setActivePromptId('');setActiveJobId('');setGenerating(false)
         }else if(value.status==='failed'){
           const sample=benchmarkRef.current
-          if(sample)await invoke('benchmark_save',{report:{schemaVersion:1,reportId:value.promptId,createdAt:Math.floor(Date.now()/1000),studioVersion:'0.6.3',gpuName:sample.gpuName||'未检测到',driverVersion:sample.driverVersion,vramTotalMb:sample.vramTotal,peakVramUsedMb:sample.peakVram,ramTotalMb:sample.ramTotal,peakRamUsedMb:sample.peakRam,runtimeVersion:comfyUrl,h3PatchCommit:h3Patch?.commit||'',generationMode:sample.mode,width:sample.width,height:sample.height,durationSeconds:sample.duration,steps:sample.steps,modelFile:sample.modelFile,enabledPlugins:Object.entries(pluginLock.plugins).filter(([,item])=>item.enabled).map(([id])=>id),elapsedSeconds:(Date.now()-sample.startedAt)/1000,outcome:'failed',errorSummary:value.error||'ComfyUI 执行失败',outputFile:''}}).catch(()=>{})
-          benchmarkRef.current=null;setActivePromptId('');setGenerating(false)
+          if(sample)await invoke('benchmark_save',{report:{schemaVersion:1,reportId:value.promptId,createdAt:Math.floor(Date.now()/1000),studioVersion:'0.8.1',gpuName:sample.gpuName||'未检测到',driverVersion:sample.driverVersion,vramTotalMb:sample.vramTotal,peakVramUsedMb:sample.peakVram,ramTotalMb:sample.ramTotal,peakRamUsedMb:sample.peakRam,runtimeVersion:comfyUrl,h3PatchCommit:h3Patch?.commit||'',generationMode:sample.mode,width:sample.width,height:sample.height,durationSeconds:sample.duration,steps:sample.steps,modelFile:sample.modelFile,enabledPlugins:Object.entries(pluginLock.plugins).filter(([,item])=>item.enabled).map(([id])=>id),elapsedSeconds:(Date.now()-sample.startedAt)/1000,outcome:'failed',errorSummary:value.error||'ComfyUI 执行失败',outputFile:''}}).catch(()=>{})
+          if(activeJobId)await invoke('update_job',{patch:{id:activeJobId,status:'failed',stage:'生成失败',progress:1,planJson:null,outputPath:null,errorSummary:value.error||'ComfyUI 执行失败'}}).catch(()=>{})
+          benchmarkRef.current=null;setActivePromptId('');setActiveJobId('');setGenerating(false)
         }
       }catch(error){if(!stopped)setJobMessage(`读取生成状态失败：${String(error)}`)}
     }
     poll();const timer=setInterval(poll,3000)
     return()=>{stopped=true;clearInterval(timer)}
-  },[activePromptId,comfyUrl,outputPath,h3Patch?.commit,pluginLock.plugins])
+  },[activePromptId,activeJobId,comfyUrl,outputPath,h3Patch?.commit,pluginLock.plugins])
   useEffect(()=>{
     if(engine!=='cloud'||!cloudTask||['completed','failed'].includes(cloudTask.status))return
     let stopped=false
-    const poll=async()=>{try{const next=await invoke<CloudPoll>('minimax_cloud_poll',{taskId:cloudTask.taskId});if(stopped)return;setCloudTask(next);if(next.status==='completed'&&next.fileId){const saved=await invoke<string>('minimax_cloud_save',{fileId:next.fileId,outputDirectory:outputPath});setJobMessage(`云端生成完成，已保存到 ${saved}`);setGenerating(false)}else if(next.status==='failed'){setJobMessage(`云端生成失败：${next.error||'服务返回失败'}`);setGenerating(false)}}catch(error){if(!stopped){setJobMessage(`读取云端任务失败：${String(error)}`);setGenerating(false)}}}
-    const timer=setInterval(poll,3000);poll();return()=>{stopped=true;clearInterval(timer)}
-  },[cloudTask?.taskId,cloudTask?.status,engine,outputPath])
+    const poll=async()=>{try{const next=await invoke<CloudPoll>('minimax_cloud_poll',{taskId:cloudTask.taskId});if(stopped)return;setCloudTask(next);if(activeJobId&&['queued','running'].includes(next.status))await invoke('update_job',{patch:{id:activeJobId,status:next.status,stage:next.status==='running'?'云端生成中':'云端排队中',progress:(next.progress||0)/100,planJson:null,outputPath:null,errorSummary:null}}).catch(()=>{});if(next.status==='completed'&&next.fileId){const saved=await invoke<string>('minimax_cloud_save',{fileId:next.fileId,outputDirectory:outputPath});if(activeJobId)await invoke('update_job',{patch:{id:activeJobId,status:'completed',stage:'已完成',progress:1,planJson:null,outputPath:saved,errorSummary:null}}).catch(()=>{});setJobMessage(`云端生成完成，已保存到 ${saved}`);setActiveJobId('');setGenerating(false)}else if(next.status==='failed'){if(activeJobId)await invoke('update_job',{patch:{id:activeJobId,status:'failed',stage:'云端生成失败',progress:1,planJson:null,outputPath:null,errorSummary:next.error||'服务返回失败'}}).catch(()=>{});setJobMessage(`云端生成失败：${next.error||'服务返回失败'}`);setActiveJobId('');setGenerating(false)}}catch(error){if(!stopped){setJobMessage(`读取云端任务失败：${String(error)}`);setGenerating(false)}}}
+    const timer=setInterval(poll,10000);poll();return()=>{stopped=true;clearInterval(timer)}
+  },[cloudTask?.taskId,cloudTask?.status,engine,outputPath,activeJobId])
   const gpu = system?.gpu
   const gpuPercent = gpu ? Math.min(100, Math.round(gpu.memoryUsedMb / gpu.memoryTotalMb * 100)) : 31
   const h3Ready = !!probeResult && (h3Patch?.requiredNodes || []).every(node=>probeResult.h3RelatedNodes.includes(node))
@@ -250,7 +257,7 @@ function App() {
       if(!apiKeyStatus.configured){setJobMessage('请先在运行引擎中设置 MiniMax API Key');setGenerating(false);setEngineDialog(true);return}
       if(mode==='frames'&&(assets.length<1||assets.some(item=>item.kind!=='image'))){setJobMessage('云端首帧/首尾帧模式需要 1–2 张图片');setGenerating(false);return}
       if(cloudResolution==='1080P'&&duration!==6){setJobMessage('Hailuo-2.3 的 1080P 当前仅支持 6 秒');setGenerating(false);return}
-      try{setJobMessage('正在安全提交 MiniMax 云端任务…');const started=await invoke<CloudStart>('minimax_cloud_start',{input:{prompt,mode:mode==='text'?'text':assets.length>1?'first_last_frames':'first_frame',model:mode==='frames'&&assets.length>1?'Hailuo-02':'Hailuo-2.3',resolution:cloudResolution,durationSeconds:duration,assets:assets.map(({path,role})=>({path,role}))}});setCloudTask({taskId:started.taskId,status:'queued',progress:0});setJobMessage(`云端任务 ${started.taskId} 已提交`)}catch(error){setJobMessage(String(error));setGenerating(false)}return
+      try{setJobMessage('正在安全提交 MiniMax 云端任务…');const cloudRequest={prompt,mode:mode==='text'?'text':assets.length>1?'first_last_frames':'first_frame',model:mode==='frames'&&assets.length>1?'Hailuo-02':'Hailuo-2.3',resolution:cloudResolution,durationSeconds:duration,outputDirectory:outputPath,assets:assets.map(({path,role})=>({path,role}))};const started=await invoke<CloudStart>('minimax_cloud_start',{input:cloudRequest});const job=await invoke<{id:string}>('create_job',{input:{name:`MiniMax 云端 · ${new Date().toLocaleTimeString()}`,requestJson:JSON.stringify({...cloudRequest,engine:'cloud',taskId:started.taskId}),backendId:started.taskId}});setActiveJobId(job.id);setCloudTask({taskId:started.taskId,status:'queued',progress:0});setJobMessage(`云端任务 ${job.id} 已提交`)}catch(error){setJobMessage(String(error));setGenerating(false)}return
     }
     const workflowMode=mode==='text'?'t2v':mode==='frames'?'fl2va':'ref2va'
     if(acceleration==='kj_h3_sage_attention'&&!kjSageReady){setJobMessage('请先安装 KJNodes、重启托管 Runtime 并重新检测 H3 SageAttention 节点');setGenerating(false);return}
@@ -261,7 +268,7 @@ function App() {
       const started=await invoke<StartedGeneration>('start_h3_generation',{input:request})
       benchmarkRef.current={startedAt:Date.now(),mode:workflowMode,width:localWidth,height:localHeight,duration,steps,modelFile:workflowMode==='ref2va'?'minimax_h3_ref2va_pruned_int8_convrot.safetensors':'minimax_h3_fl2va_pruned_int8_convrot.safetensors',gpuName:system?.gpu?.name||'',driverVersion:system?.gpu?.driverVersion||'',vramTotal:system?.gpu?.memoryTotalMb||0,peakVram:system?.gpu?.memoryUsedMb||0,ramTotal:system?.memoryTotalMb||0,peakRam:system?.memoryUsedMb||0}
       const job = await invoke<{id:string}>('create_job', { input:{ name:`${modeContent[mode].title} · ${new Date().toLocaleTimeString()}`, requestJson:JSON.stringify({...request,promptId:started.promptId}), backendId:started.promptId } })
-      setActivePromptId(started.promptId);setGenerationPoll({status:'queued',promptId:started.promptId,queuePosition:started.queueNumber,outputs:[]})
+      setActiveJobId(job.id);setActivePromptId(started.promptId);setGenerationPoll({status:'queued',promptId:started.promptId,queuePosition:started.queueNumber,outputs:[]})
       setJobMessage(`任务 ${job.id} 已提交 ComfyUI${started.queueNumber!==undefined?` · 队列编号 ${started.queueNumber}`:''}`)
     } catch(error) { setJobMessage(String(error));setGenerating(false) }
   }
@@ -277,6 +284,30 @@ function App() {
     setPathMessage('正在检查…')
     try { const value = await invoke<string>('validate_output_path', { path:outputPath }); setOutputPath(value); setPathMessage('目录可写，已保存') }
     catch (error) { setPathMessage(String(error)) }
+  }
+
+  const reuseJob = async (job:JobRecord) => {
+    try{
+      const value=JSON.parse(job.requestJson) as Record<string,unknown>
+      if(typeof value.prompt==='string')setPrompt(value.prompt)
+      if(typeof value.durationSeconds==='number')setDuration(value.durationSeconds)
+      if(typeof value.steps==='number')setSteps(value.steps)
+      if(typeof value.outputDirectory==='string')setOutputPath(value.outputDirectory)
+      if(value.engine==='cloud'){
+        setEngine('cloud');setMode(value.mode==='text'?'text':'frames')
+        if(value.resolution==='768P'||value.resolution==='1080P')setCloudResolution(value.resolution)
+      }else{
+        setEngine('local');setMode(value.mode==='t2v'?'text':value.mode==='fl2va'?'frames':'reference')
+        if(typeof value.width==='number'&&typeof value.height==='number'){
+          const resolution=`${value.width}x${value.height}`
+          if(['608x352','736x416','1344x768'].includes(resolution))setLocalResolution(resolution as '608x352'|'736x416'|'1344x768')
+        }
+        if(value.acceleration==='native'||value.acceleration==='kj_h3_sage_attention')setAcceleration(value.acceleration)
+      }
+      const stored=Array.isArray(value.assets)?value.assets as Array<{path:string;role:LocalAsset['role']}>:[]
+      if(stored.length){const inspected=await invoke<Array<Omit<LocalAsset,'role'|'status'>>>('inspect_input_files',{paths:stored.map(item=>item.path)});setAssets(inspected.map((item,index)=>({...item,role:stored[index].role,status:'selected'})))}else setAssets([])
+      setHistoryDialog(false);setJobMessage(stored.length?'已恢复参数和仍然存在的本地素材':'已恢复任务参数')
+    }catch(error){setJobMessage(`恢复任务设置失败：${String(error)}`);setHistoryDialog(false)}
   }
 
   const chooseOutputPath = async () => {
@@ -322,6 +353,14 @@ function App() {
   const chooseSshFile = async (kind:'identity'|'knownHosts') => {
     const selected=await open({multiple:false,title:kind==='identity'?'选择 SSH 私钥':'选择已核验的 known_hosts 文件'})
     if(typeof selected==='string'){if(kind==='identity')setSshIdentity(selected);else setSshKnownHosts(selected)}
+  }
+
+  const applyAutoDlSshCommand = () => {
+    const match=autodlSshCommand.trim().match(/^ssh\s+(?:-p\s+(\d+)\s+)?([A-Za-z0-9._-]+)@([A-Za-z0-9.:-]+)(?:\s+-p\s+(\d+))?$/i)
+    if(!match){setSshMessage('AutoDL SSH 命令格式应类似：ssh -p 10309 root@connect.example.com');return}
+    const port=Number(match[1]||match[4]||22)
+    if(port<1||port>65535){setSshMessage('AutoDL SSH 端口无效');return}
+    setSshUser(match[2]);setSshHost(match[3]);setSshPort(port);setSshMessage('已读取 AutoDL SSH 主机、用户名和端口；请继续选择私钥与 known_hosts')
   }
 
   const startSshTunnel = async () => {
@@ -415,7 +454,7 @@ function App() {
         <div className="brand"><div className="brand-mark"><Aperture size={20}/></div><div><strong>Langbai H3</strong><span>Studio</span></div></div>
         <nav aria-label="主导航">
           <button className="nav-item active"><WandSparkles/><span>开始创作</span></button>
-          <button className="nav-item" onClick={openHistory}><Clock3/><span>生成记录</span><b>{jobs.length || 3}</b></button>
+          <button className="nav-item" onClick={openHistory}><Clock3/><span>生成记录</span>{jobs.length>0&&<b>{jobs.length}</b>}</button>
           <button className="nav-item" onClick={()=>setModelDialog(true)}><Boxes/><span>模型中心</span></button>
           <button className="nav-item" onClick={openPlugins}><Zap/><span>加速插件</span><b>{Object.keys(pluginLock.plugins).length||''}</b></button>
           <button className="nav-item" onClick={()=>setWorkflowDialog(true)}><LayoutGrid/><span>工作流</span></button>
@@ -434,7 +473,6 @@ function App() {
           <div className="top-actions">
             <button className={`engine ${engine==='cloud'?'cloud':''}`} onClick={()=>setEngineDialog(true)}><span className="status-dot"/> {engine==='local'?'本地 H3':'MiniMax 云端 Hailuo API'} <ChevronDown/></button>
             <button className="icon-button" aria-label="切换主题" onClick={() => setDark(!dark)}>{dark ? <Sun/> : <Moon/>}</button>
-            <button className="icon-button" aria-label="更多选项"><MoreHorizontal/></button>
           </div>
         </header>
 
@@ -512,6 +550,7 @@ function App() {
           {managedMessage&&<div className={`probe-message ${managedMessage.includes('已启动')||managedMessage.includes('已停止')?'success':'error'}`}><Cpu/><span><strong>{managedMessage}</strong><small>{managedStatus?.pid?`进程 PID ${managedStatus.pid}`:'启动参数只由内置显存档位生成'}</small></span></div>}
           <div className="section-divider"><span>租用 RTX 5090 / 远程工作站</span></div>
           <p>Studio 使用 Windows OpenSSH 把远端 127.0.0.1:8188 转发到本机随机端口。远端 ComfyUI 不需要开放公网端口。</p>
+          <label>AutoDL SSH 登录命令</label><div className="url-row"><input value={autodlSshCommand} onChange={e=>setAutodlSshCommand(e.target.value)} placeholder="ssh -p 10309 root@connect.example.com"/><button onClick={applyAutoDlSshCommand}>自动填写</button></div>
           <div className="ssh-grid"><label>SSH 主机<input value={sshHost} onChange={e=>setSshHost(e.target.value)} placeholder="GPU_SERVER_IP"/></label><label>用户名<input value={sshUser} onChange={e=>setSshUser(e.target.value)} /></label><label>SSH 端口<input type="number" min="1" max="65535" value={sshPort} onChange={e=>setSshPort(Number(e.target.value))}/></label><label>远端 ComfyUI 端口<input type="number" min="1" max="65535" value={sshRemotePort} onChange={e=>setSshRemotePort(Number(e.target.value))}/></label></div>
           <label>SSH 私钥</label><div className="url-row"><input value={sshIdentity} readOnly placeholder="选择专用 SSH 私钥"/><button onClick={()=>chooseSshFile('identity')}>选择</button></div>
           <label>known_hosts</label><div className="url-row"><input value={sshKnownHosts} readOnly placeholder="选择已从租用商核验指纹的 known_hosts"/><button onClick={()=>chooseSshFile('knownHosts')}>选择</button></div>
@@ -599,7 +638,7 @@ function App() {
         <section className="modal model-modal" role="dialog" aria-modal="true" aria-labelledby="history-title">
           <div className="modal-head"><div><span className="eyebrow"><Clock3/> 本地任务</span><h2 id="history-title">生成记录</h2></div><button className="icon-button" onClick={()=>setHistoryDialog(false)} aria-label="关闭对话框"><X/></button></div>
           <p>任务保存在本机 SQLite 数据库中，重启软件后仍可恢复参数和状态。</p>
-          <div className="job-list">{historyLoading?<div className="empty-result">正在读取任务…</div>:jobs.length===0?<div className="empty-result">暂时没有本地任务记录</div>:jobs.map(job=><article key={job.id}><div className={`job-state ${job.status}`}>{Math.round(job.progress*100)}%</div><div><strong>{job.name}</strong><small>{job.stage} · {job.backendId}</small><span>{new Date(job.updatedAt*1000).toLocaleString()}</span></div><button>复用设置</button></article>)}</div>
+          <div className="job-list">{historyLoading?<div className="empty-result">正在读取任务…</div>:jobs.length===0?<div className="empty-result">暂时没有本地任务记录</div>:jobs.map(job=><article key={job.id}><div className={`job-state ${job.status}`}>{Math.round(job.progress*100)}%</div><div><strong>{job.name}</strong><small>{job.stage} · {job.backendId}</small><span>{new Date(job.updatedAt*1000).toLocaleString()}{job.outputPath?` · ${job.outputPath}`:''}</span></div><button onClick={()=>reuseJob(job)}>复用设置</button></article>)}</div>
         </section>
       </div>}
       {settingsDialog && <div className="modal-backdrop" role="presentation" onMouseDown={e=>{if(e.target===e.currentTarget)setSettingsDialog(false)}}>
