@@ -16,6 +16,9 @@ type ModelScan = { root:string; maxDepth:number; models:Array<{directory:string;
 type JobRecord = { id:string;name:string;status:string;stage:string;progress:number;backendId:string;outputPath?:string;errorSummary?:string;createdAt:number;updatedAt:number }
 type RuntimeManifest = { version:string;url:string;sha256:string;archiveFormat:string;expectedFiles:string[] }
 type TransferProgress = { phase:string;downloadedBytes?:number;totalBytes?:number;progressPercent?:number;bytesPerSecond?:number;etaSeconds?:number;currentFile?:string }
+type ModelBundle = { id:string;name:string;variant:string;revision:string;license:string;licenseUrl:string;recommendedVramGb:number;recommendedRamGb:number;files:Array<{relativePath:string;size:number;sha256:string}> }
+type ModelBundleFileEvent = { bundleId:string;index:number;count:number;relativePath:string;size:number }
+type ModelDownloadEvent = { relativePath:string;progress:TransferProgress }
 
 const modeContent = {
   text: { title: '文字生成视频', desc: '只需描述画面、镜头和声音，适合从零开始创作。' },
@@ -27,8 +30,6 @@ function App() {
   const [dark, setDark] = useState(false)
   const [mode, setMode] = useState<Mode>('text')
   const [advanced, setAdvanced] = useState(false)
-  const [downloading, setDownloading] = useState(false)
-  const [downloaded, setDownloaded] = useState(42)
   const [generating, setGenerating] = useState(false)
   const [duration, setDuration] = useState(8)
   const [prompt, setPrompt] = useState('一艘银白色飞船掠过紫色星云，镜头缓慢推进。远处恒星闪烁，配合低沉而辽阔的环境音。')
@@ -54,14 +55,24 @@ function App() {
   const [runtimeProgress, setRuntimeProgress] = useState<TransferProgress | null>(null)
   const [installingRuntime, setInstallingRuntime] = useState('')
   const [runtimeMessage, setRuntimeMessage] = useState('')
+  const [modelBundles, setModelBundles] = useState<ModelBundle[]>([])
+  const [selectedBundle, setSelectedBundle] = useState('h3-t2v-int8')
+  const [licenseAccepted, setLicenseAccepted] = useState(false)
+  const [installingModel, setInstallingModel] = useState(false)
+  const [modelInstallMessage, setModelInstallMessage] = useState('')
+  const [modelFile, setModelFile] = useState<ModelBundleFileEvent | null>(null)
+  const [modelProgress, setModelProgress] = useState<TransferProgress | null>(null)
   const estimate = useMemo(() => duration <= 6 ? '约 8–12 分钟' : duration <= 10 ? '约 14–20 分钟' : '约 22–30 分钟', [duration])
 
   useEffect(() => {
     invoke<SystemProbe>('probe_system').then(setSystem).catch(() => {})
     invoke<RuntimeManifest[]>('runtime_manifests').then(setRuntimeManifests).catch(()=>{})
+    invoke<ModelBundle[]>('model_bundles').then(setModelBundles).catch(()=>{})
     const unlisteners = Promise.all([
       listen<TransferProgress>('runtime-download-progress', event=>setRuntimeProgress(event.payload)),
       listen<TransferProgress>('runtime-install-progress', event=>setRuntimeProgress(event.payload)),
+      listen<ModelBundleFileEvent>('model-bundle-file', event=>{setModelFile(event.payload);setModelProgress(null)}),
+      listen<ModelDownloadEvent>('model-download-progress', event=>setModelProgress(event.payload.progress)),
     ]).catch(()=>[] as Array<()=>void>)
     return ()=>{unlisteners.then(items=>items.forEach(fn=>fn()))}
   }, [])
@@ -114,13 +125,14 @@ function App() {
     finally { setInstallingRuntime('') }
   }
 
-  const startDownload = () => {
-    setDownloading(true)
-    setDownloaded((v) => v >= 100 ? 0 : v)
-    const timer = setInterval(() => setDownloaded(v => {
-      if (v >= 100) { clearInterval(timer); setDownloading(false); return 100 }
-      return Math.min(100, v + 2)
-    }), 120)
+  const installModelBundle = async () => {
+    setInstallingModel(true); setModelInstallMessage(''); setModelProgress({phase:'preparing',progressPercent:0})
+    try {
+      const installed = await invoke<{modelRoot:string;totalSize:number}>('download_h3_bundle',{bundleId:selectedBundle,licenseAccepted})
+      setModelProgress({phase:'completed',progressPercent:100})
+      setModelInstallMessage(`??????????? ? ${(installed.totalSize/1024/1024/1024).toFixed(1)} GiB ? ${installed.modelRoot}`)
+    } catch(error) { setModelInstallMessage(String(error)) }
+    finally { setInstallingModel(false) }
   }
 
   return (
@@ -194,7 +206,7 @@ function App() {
           </div>
 
           <section className="download-card">
-            <div className="model-icon"><Download/></div><div className="download-info"><div><strong>MiniMax-H3 Ref2VA · 单卡优化版</strong><span className="tag">推荐</span></div><p>支持图片、视频与音频参考 · BF16/量化混合 · 约 38.4 GB</p><div className="progress"><span style={{width:`${downloaded}%`}}/></div><small>{downloaded < 100 ? `已下载 ${(38.4*downloaded/100).toFixed(1)} GB / 38.4 GB · 42.8 MB/s · 剩余约 ${Math.ceil((100-downloaded)/6)} 分钟` : '下载完成 · 文件校验通过'}</small></div><button onClick={startDownload} disabled={downloading || downloaded===100}>{downloaded===100?'已安装':downloading?'下载中':'继续下载'}</button><button className="icon-button" aria-label="关闭"><X/></button>
+            <div className="model-icon"><Download/></div><div className="download-info"><div><strong>MiniMax-H3 ??????</strong><span className="tag">?????</span></div><p>??? 39.6 GiB?42.5 GB?? ?? 24GB ??? 64GB ?? ? ??????? SHA-256 ??</p><small>??????????????????????????????????????</small></div><button onClick={()=>setModelDialog(true)}>??????</button>
           </section>
         </div>
       </main>
@@ -218,6 +230,12 @@ function App() {
         <section className="modal model-modal" role="dialog" aria-modal="true" aria-labelledby="model-title">
           <div className="modal-head"><div><span className="eyebrow"><HardDrive/> 模型中心</span><h2 id="model-title">使用本地已有模型</h2></div><button className="icon-button" onClick={()=>setModelDialog(false)} aria-label="关闭对话框"><X/></button></div>
           <p>选择包含 MiniMax-H3 FL2VA 或 Ref2VA 的目录。扫描只读取文件结构，不移动或删除权重。</p>
+          <div className="runtime-options">{modelBundles.map(bundle=>{const total=bundle.files.reduce((sum,file)=>sum+file.size,0);return <article key={bundle.id} className={selectedBundle===bundle.id?'selected':''}><div className="model-icon"><Download/></div><div><strong>{bundle.name}</strong><small>{bundle.variant.toUpperCase()} · {(total/1024/1024/1024).toFixed(1)} GiB · {bundle.files.length} 个文件</small><span>建议显存 {bundle.recommendedVramGb}GB / 内存 {bundle.recommendedRamGb}GB</span></div><button onClick={()=>setSelectedBundle(bundle.id)}>{selectedBundle===bundle.id?'已选择':'选择'}</button></article>})}</div>
+          <label className="license-check"><input type="checkbox" checked={licenseAccepted} onChange={e=>setLicenseAccepted(e.target.checked)}/><span>我已阅读并接受 <a href={modelBundles.find(item=>item.id===selectedBundle)?.licenseUrl} target="_blank" rel="noreferrer">MiniMax H3 Community License</a></span></label>
+          <button className="primary wide" onClick={installModelBundle} disabled={!licenseAccepted || installingModel || modelBundles.length===0}>{installingModel?'正在下载并校验…':'下载到托管 ComfyUI'}</button>
+          {modelFile && <div className="runtime-progress"><div><span>文件 {modelFile.index+1}/{modelFile.count} · {modelFile.relativePath.split('/').pop()}</span><strong>{Math.round(modelProgress?.progressPercent||0)}%</strong></div><div className="progress"><span style={{width:`${modelProgress?.progressPercent||0}%`}}/></div><small>{modelProgress?.bytesPerSecond?`${(modelProgress.bytesPerSecond/1024/1024).toFixed(1)} MB/s`:modelProgress?.phase||'正在准备'} {modelProgress?.etaSeconds?`· 剩余约 ${Math.ceil(modelProgress.etaSeconds/60)} 分钟`:''}</small></div>}
+          {modelInstallMessage && <div className={`probe-message ${modelInstallMessage.includes('完成')?'success':'error'}`}><ShieldCheck/><span><strong>{modelInstallMessage.includes('完成')?'模型可用':'安装未完成'}</strong><small>{modelInstallMessage}</small></span></div>}
+          <div className="section-divider"><span>或使用本地已有模型</span></div>
           <label htmlFor="model-path">模型目录</label>
           <div className="url-row"><input id="model-path" value={modelPath} onChange={e=>setModelPath(e.target.value)} /><button onClick={scanModels} disabled={scanningModels}>{scanningModels?'正在扫描…':'扫描目录'}</button></div>
           {modelError && <div className="probe-message error"><Info/><span><strong>扫描未完成</strong><small>{modelError}</small></span></div>}

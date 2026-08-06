@@ -2,7 +2,7 @@
 
 面向 Windows NVIDIA 单卡用户的 MiniMax-H3 视频生成桌面软件，以清晰的创作表单和智能预设替代 ComfyUI 节点画布，并保留本地模型、外接 ComfyUI、MiniMax API 与社区加速插件扩展能力。
 
-> 当前阶段：Windows MVP 骨架。已提供 Tauri 桌面壳、真实 NVIDIA/系统硬件检测、输出目录写入验证和本机 ComfyUI `/object_info` 能力探测；完整模型下载、工作流执行和任务持久化继续开发中。
+> 当前阶段：Windows MVP 开发版。已提供 Tauri 桌面壳、硬件检测、托管 ComfyUI 安装与进程管理、H3 优化模型真实断点下载、输出目录验证、本机 ComfyUI 能力探测和 SQLite 任务记录；端到端素材上传与生成执行继续开发中。
 
 ## 已确认范围
 

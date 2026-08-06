@@ -13,6 +13,7 @@ mod comfy;
 mod comfy_transport;
 mod download;
 mod job_store;
+mod model_bundle;
 mod model_store;
 mod runtime_installer;
 mod runtime_manager;
@@ -38,6 +39,76 @@ fn builtin_runtime_manifest(variant: &str) -> Result<runtime_installer::RuntimeM
         _ => return Err("未知的 Runtime 版本".into()),
     };
     serde_json::from_str(source).map_err(|e| format!("内置 Runtime 清单损坏：{e}"))
+}
+
+#[tauri::command]
+fn model_bundles() -> Result<Vec<model_bundle::ModelBundle>, String> {
+    model_bundle::builtins()
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InstalledModelBundle {
+    id: String,
+    model_root: String,
+    total_size: u64,
+    files: Vec<String>,
+}
+
+#[tauri::command]
+async fn download_h3_bundle(
+    app: tauri::AppHandle,
+    bundle_id: String,
+    license_accepted: bool,
+) -> Result<InstalledModelBundle, String> {
+    if !license_accepted {
+        return Err("下载前需要阅读并接受 MiniMax H3 Community License".into());
+    }
+    let bundle = model_bundle::select(&bundle_id)?;
+    let current = runtime_manager::RuntimeManager::new(runtime_root())
+        .current()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "请先安装托管 ComfyUI 运行环境".to_string())?;
+    let model_root = current
+        .profile_dir
+        .join("ComfyUI_windows_portable")
+        .join("ComfyUI")
+        .join("models");
+    std::fs::create_dir_all(&model_root).map_err(|e| format!("创建模型目录失败：{e}"))?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60 * 60 * 24))
+        .build()
+        .map_err(|e| format!("创建模型下载客户端失败：{e}"))?;
+    let mut installed = Vec::new();
+    for (index, file) in bundle.files.iter().enumerate() {
+        let _=app.emit("model-bundle-file",serde_json::json!({"bundleId":bundle.id,"index":index,"count":bundle.files.len(),"relativePath":file.relative_path,"size":file.size}));
+        let request = download::DownloadRequest {
+            source_url: bundle.download_url(file),
+            relative_path: std::path::PathBuf::from(&file.relative_path),
+            expected_sha256: file.sha256.clone(),
+        };
+        let path = file.relative_path.clone();
+        download::download_model(&client, &model_root, &request, |progress| {
+            let _ = app.emit(
+                "model-download-progress",
+                serde_json::json!({"relativePath":path,"progress":progress}),
+            );
+        })
+        .await?;
+        installed.push(file.relative_path.clone());
+    }
+    let acceptance = runtime_root().join("license-acceptance.json");
+    if let Some(parent) = acceptance.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&acceptance,serde_json::to_vec_pretty(&serde_json::json!({"license":bundle.license,"url":bundle.license_url,"accepted":true,"bundleId":bundle.id,"timestamp":SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()})).map_err(|e|e.to_string())?).map_err(|e|format!("保存许可确认失败：{e}"))?;
+    let total_size = bundle.total_size();
+    Ok(InstalledModelBundle {
+        id: bundle.id,
+        model_root: model_root.to_string_lossy().into_owned(),
+        total_size,
+        files: installed,
+    })
 }
 
 #[tauri::command]
@@ -582,6 +653,8 @@ pub fn run() {
             compile_workflow,
             download_model_file,
             model_store::scan_local_models,
+            model_bundles,
+            download_h3_bundle,
             runtime_get_current,
             runtime_manifests,
             runtime_download_install_activate,

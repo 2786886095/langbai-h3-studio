@@ -80,6 +80,20 @@ where
 {
     validate_sha256(&request.expected_sha256)?;
     let final_path = safe_destination(model_root, &request.relative_path)?;
+    if final_path.is_file() {
+        let existing_sha = sha256_file(&final_path)?;
+        if existing_sha.eq_ignore_ascii_case(&request.expected_sha256) {
+            let size = fs::metadata(&final_path)
+                .map_err(|e| format!("读取已有模型失败：{e}"))?
+                .len();
+            emit(progress(DownloadPhase::Completed, size, Some(size), 0.0));
+            return Ok(DownloadResult {
+                path: final_path,
+                size_bytes: size,
+                sha256: existing_sha,
+            });
+        }
+    }
     let part_path = append_suffix(&final_path, ".part")?;
     let sidecar_path = append_suffix(&part_path, ".json")?;
     emit(progress(DownloadPhase::Preparing, 0, None, 0.0));

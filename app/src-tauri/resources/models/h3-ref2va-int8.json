@@ -1,0 +1,16 @@
+{
+  "id": "h3-ref2va-int8",
+  "name": "MiniMax-H3 全模态参考单卡版",
+  "variant": "ref2va",
+  "revision": "eb8a16107c595128b3a578f82d2ce2f75920c355",
+  "license": "MiniMax H3 Community License Agreement",
+  "licenseUrl": "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE",
+  "recommendedVramGb": 24,
+  "recommendedRamGb": 64,
+  "files": [
+    {"relativePath":"diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors","size":20970379616,"sha256":"9255f52b6677845ad238f20dfaafa94727053694127ab7f255c048f0f9365779"},
+    {"relativePath":"text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors","size":15687142551,"sha256":"35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6"},
+    {"relativePath":"vae/minimax_h3_audio_vae_fp32.safetensors","size":605254808,"sha256":"8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48"},
+    {"relativePath":"vae/minimax_h3_video_vae_fp16.safetensors","size":5207808496,"sha256":"7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522"}
+  ]
+}
