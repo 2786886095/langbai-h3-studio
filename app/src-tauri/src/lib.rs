@@ -1,5 +1,10 @@
 use serde::Serialize;
-use std::{path::PathBuf, process::Command, time::Duration};
+use std::{
+    path::PathBuf,
+    process::{Child, Command},
+    sync::Mutex,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use sysinfo::System;
 use tauri::Emitter;
 use url::Url;
@@ -9,13 +14,176 @@ mod comfy_transport;
 mod download;
 mod job_store;
 mod model_store;
+mod runtime_installer;
 mod runtime_manager;
+mod update_manager;
+mod workflow_registry;
 
 fn runtime_root() -> PathBuf {
     let base = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
     base.join("LangbaiH3Studio").join("runtime").join("comfy")
+}
+
+struct ManagedRuntimeProcess {
+    child: Child,
+    endpoint: String,
+    started_at: u64,
+}
+
+#[derive(Default)]
+struct ManagedRuntimeState(Mutex<Option<ManagedRuntimeProcess>>);
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ManagedRuntimeStatus {
+    running: bool,
+    pid: Option<u32>,
+    endpoint: Option<String>,
+    started_at: Option<u64>,
+    exit_code: Option<i32>,
+}
+
+#[tauri::command]
+fn runtime_start(
+    state: tauri::State<'_, ManagedRuntimeState>,
+) -> Result<ManagedRuntimeStatus, String> {
+    let manager = runtime_manager::RuntimeManager::new(runtime_root());
+    let plan = manager
+        .launch_plan("python\\python.exe", "ComfyUI\\main.py")
+        .map_err(|e| e.to_string())?;
+    if !plan.program.is_file() {
+        return Err("托管 Runtime 缺少 Python，可在运行环境页面执行修复".into());
+    }
+    let mut slot = state
+        .0
+        .lock()
+        .map_err(|_| "Runtime 状态锁异常".to_string())?;
+    if let Some(process) = slot.as_mut() {
+        if process
+            .child
+            .try_wait()
+            .map_err(|e| format!("读取 Runtime 状态失败：{e}"))?
+            .is_none()
+        {
+            return Ok(ManagedRuntimeStatus {
+                running: true,
+                pid: Some(process.child.id()),
+                endpoint: Some(process.endpoint.clone()),
+                started_at: Some(process.started_at),
+                exit_code: None,
+            });
+        }
+    }
+    let mut command = Command::new(&plan.program);
+    command
+        .args(&plan.args)
+        .current_dir(&plan.working_dir)
+        .envs(&plan.environment);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let child = command
+        .spawn()
+        .map_err(|e| format!("启动托管 ComfyUI 失败：{e}"))?;
+    let pid = child.id();
+    let started_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    *slot = Some(ManagedRuntimeProcess {
+        child,
+        endpoint: plan.endpoint.clone(),
+        started_at,
+    });
+    Ok(ManagedRuntimeStatus {
+        running: true,
+        pid: Some(pid),
+        endpoint: Some(plan.endpoint),
+        started_at: Some(started_at),
+        exit_code: None,
+    })
+}
+
+#[tauri::command]
+fn runtime_status(
+    state: tauri::State<'_, ManagedRuntimeState>,
+) -> Result<ManagedRuntimeStatus, String> {
+    let mut slot = state
+        .0
+        .lock()
+        .map_err(|_| "Runtime 状态锁异常".to_string())?;
+    let Some(process) = slot.as_mut() else {
+        return Ok(ManagedRuntimeStatus {
+            running: false,
+            pid: None,
+            endpoint: None,
+            started_at: None,
+            exit_code: None,
+        });
+    };
+    match process
+        .child
+        .try_wait()
+        .map_err(|e| format!("读取 Runtime 状态失败：{e}"))?
+    {
+        None => Ok(ManagedRuntimeStatus {
+            running: true,
+            pid: Some(process.child.id()),
+            endpoint: Some(process.endpoint.clone()),
+            started_at: Some(process.started_at),
+            exit_code: None,
+        }),
+        Some(status) => {
+            let result = ManagedRuntimeStatus {
+                running: false,
+                pid: Some(process.child.id()),
+                endpoint: Some(process.endpoint.clone()),
+                started_at: Some(process.started_at),
+                exit_code: status.code(),
+            };
+            *slot = None;
+            Ok(result)
+        }
+    }
+}
+
+#[tauri::command]
+fn runtime_stop(
+    state: tauri::State<'_, ManagedRuntimeState>,
+) -> Result<ManagedRuntimeStatus, String> {
+    let mut slot = state
+        .0
+        .lock()
+        .map_err(|_| "Runtime 状态锁异常".to_string())?;
+    let Some(mut process) = slot.take() else {
+        return Ok(ManagedRuntimeStatus {
+            running: false,
+            pid: None,
+            endpoint: None,
+            started_at: None,
+            exit_code: None,
+        });
+    };
+    let pid = process.child.id();
+    process
+        .child
+        .kill()
+        .map_err(|e| format!("停止托管 ComfyUI 失败：{e}"))?;
+    let status = process
+        .child
+        .wait()
+        .map_err(|e| format!("等待 Runtime 退出失败：{e}"))?;
+    Ok(ManagedRuntimeStatus {
+        running: false,
+        pid: Some(pid),
+        endpoint: Some(process.endpoint),
+        started_at: Some(process.started_at),
+        exit_code: status.code(),
+    })
 }
 
 #[tauri::command]
@@ -45,6 +213,71 @@ fn runtime_launch_plan() -> Result<runtime_manager::LaunchPlan, String> {
     runtime_manager::RuntimeManager::new(runtime_root())
         .launch_plan("python\\python.exe", "ComfyUI\\main.py")
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn runtime_install_archive(
+    app: tauri::AppHandle,
+    manifest: runtime_installer::RuntimeManifest,
+    archive_path: String,
+) -> Result<runtime_installer::InstalledRuntime, String> {
+    runtime_installer::install_local_archive(
+        &manifest,
+        std::path::Path::new(&archive_path),
+        &runtime_root(),
+        |progress| {
+            let _ = app.emit("runtime-install-progress", progress);
+        },
+    )
+}
+
+#[tauri::command]
+fn workflow_list() -> Result<serde_json::Value, String> {
+    workflow_registry::verify_official_reference_workflows().map_err(|e| e.to_string())?;
+    serde_json::to_value(serde_json::json!({
+        "adapters": workflow_registry::registered_workflows(),
+        "officialReferences": workflow_registry::official_reference_workflows()
+    }))
+    .map_err(|e| format!("序列化工作流清单失败：{e}"))
+}
+
+#[tauri::command]
+fn workflow_capabilities(
+    mode: workflow_registry::WorkflowMode,
+    reachable: bool,
+    node_types: Vec<String>,
+) -> Result<workflow_registry::CapabilityReport, String> {
+    let descriptor = workflow_registry::select_workflow(mode).map_err(|e| e.to_string())?;
+    let probe = comfy::ProbeResult {
+        reachable,
+        node_types: node_types.into_iter().collect(),
+    };
+    descriptor
+        .capability_report(&probe)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_check_manifest(
+    current_version: String,
+    manifest_json: String,
+    include_prerelease: bool,
+) -> Result<Option<update_manager::Release>, String> {
+    let releases = update_manager::parse_releases(&manifest_json).map_err(|e| format!("{e:?}"))?;
+    let channel = if include_prerelease {
+        update_manager::UpdateChannel::PreRelease
+    } else {
+        update_manager::UpdateChannel::Stable
+    };
+    update_manager::select_update(&current_version, &releases, channel)
+        .map(|value| value.cloned())
+        .map_err(|e| format!("{e:?}"))
+}
+
+#[tauri::command]
+fn update_verify_file(path: String, sha256: String) -> Result<(), String> {
+    update_manager::verify_sha256(std::path::Path::new(&path), &sha256)
+        .map_err(|e| format!("更新包校验失败：{e:?}"))
 }
 
 #[tauri::command]
@@ -291,6 +524,14 @@ pub fn run() {
             runtime_prepare_staging,
             runtime_activate_staged,
             runtime_launch_plan,
+            runtime_install_archive,
+            workflow_list,
+            workflow_capabilities,
+            update_check_manifest,
+            update_verify_file,
+            runtime_start,
+            runtime_status,
+            runtime_stop,
             comfy_submit_prompt,
             comfy_get_queue,
             comfy_get_history,
@@ -299,6 +540,7 @@ pub fn run() {
             job_store::list_jobs,
             job_store::update_job
         ])
+        .manage(ManagedRuntimeState::default())
         .run(tauri::generate_context!())
         .expect("启动 Langbai H3 Studio 失败");
 }

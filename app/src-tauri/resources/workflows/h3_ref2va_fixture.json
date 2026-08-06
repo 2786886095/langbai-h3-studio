@@ -1,0 +1,34 @@
+{
+  "fixtureNotice": "PROJECT FIXTURE — NOT AN OFFICIAL MINIMAX OR COMFYUI WORKFLOW",
+  "source": "project-authored semantic adapter fixture; replace after an official, versioned raw workflow is verified",
+  "id": "h3-ref2va-fixture",
+  "version": 1,
+  "title": "H3 全模态参考视频（开发夹具）",
+  "requiredNodeTypes": ["H3ModelLoader", "H3TextEncode", "LoadImage", "LoadVideo", "LoadAudio", "H3ReferenceConditioning", "H3Sampler", "VHS_VideoCombine"],
+  "workflow": {
+    "1": {"class_type": "H3ModelLoader", "inputs": {"model_name": ""}},
+    "2": {"class_type": "H3TextEncode", "inputs": {"prompt": "", "negative_prompt": ""}},
+    "3": {"class_type": "LoadImage", "inputs": {"image": ""}},
+    "4": {"class_type": "LoadVideo", "inputs": {"video": ""}},
+    "5": {"class_type": "LoadAudio", "inputs": {"audio": ""}},
+    "6": {"class_type": "H3ReferenceConditioning", "inputs": {"image": ["3", 0], "video": ["4", 0], "audio": ["5", 0]}},
+    "7": {"class_type": "H3Sampler", "inputs": {"model": ["1", 0], "text": ["2", 0], "reference": ["6", 0], "width": 1280, "height": 720, "frames": 97, "steps": 20, "guidance": 6.0, "seed": 0}},
+    "8": {"class_type": "VHS_VideoCombine", "inputs": {"images": ["7", 0], "frame_rate": 24.0, "filename_prefix": "output"}}
+  },
+  "bindings": [
+    {"role": "model", "node": "1", "input": "model_name", "required": true},
+    {"role": "prompt", "node": "2", "input": "prompt", "required": true},
+    {"role": "negative_prompt", "node": "2", "input": "negative_prompt"},
+    {"role": "reference_image", "node": "3", "input": "image", "required": true},
+    {"role": "reference_video", "node": "4", "input": "video", "required": true},
+    {"role": "reference_audio", "node": "5", "input": "audio", "required": true},
+    {"role": "width", "node": "7", "input": "width", "required": true},
+    {"role": "height", "node": "7", "input": "height", "required": true},
+    {"role": "frames", "node": "7", "input": "frames", "required": true},
+    {"role": "steps", "node": "7", "input": "steps", "required": true},
+    {"role": "guidance", "node": "7", "input": "guidance", "required": true},
+    {"role": "seed", "node": "7", "input": "seed", "required": true},
+    {"role": "fps", "node": "8", "input": "frame_rate", "required": true},
+    {"role": "output_directory", "node": "8", "input": "filename_prefix", "required": true}
+  ]
+}

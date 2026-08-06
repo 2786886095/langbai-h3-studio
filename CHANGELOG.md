@@ -1,5 +1,24 @@
 # 更新记录
 
+## 0.4.0 - 2026-08-06
+
+### 新增
+
+- 声明式托管 Runtime ZIP 安装器、SHA-256 校验与 Zip Slip 防护
+- Runtime staging 安装、结构验证、激活及进程启动/停止/状态命令
+- 官方 Comfy-Org MiniMax-H3 T2V/R2V 原始模板参考资源与固定哈希
+- 项目语义工作流适配器注册、能力检查和来源区分
+- GitHub Release/自有 Manifest 更新解析与 stable/pre-release 通道
+- 更新包 Asset 选择、SHA-256 和 Ed25519 验证接口
+- `.part` 更新路径及独立 Updater 原子计划
+
+### 验证
+
+- Rust 单元与集成测试共 35 项通过
+- Runtime 安装覆盖成功、错误哈希和路径穿越
+- 官方模板参考资源的固定 SHA-256 已验证
+- TypeScript/Vite 生产构建通过
+
 ## 0.3.0 - 2026-08-06
 
 ### 新增
