@@ -22,6 +22,8 @@ type ModelBundleFileEvent = { bundleId:string;index:number;count:number;relative
 type ModelDownloadEvent = { relativePath:string;progress:TransferProgress }
 type H3PatchManifest = { id:string;commit:string;pullRequest:number;url:string;sha256:string;size:number;requiredNodes:string[];status:string }
 type LocalAsset = { path:string;name:string;size:number;mime:string;kind:'image'|'video'|'audio';role:'start_frame'|'end_frame'|'reference'|'motion_reference'|'audio_reference';status:'selected'|'uploading'|'ready'|'error';remoteName?:string;error?:string }
+type StartedGeneration = { promptId:string;queueNumber?:number;uploadedAssets:number;filenamePrefix:string;outputDirectory:string }
+type GenerationPoll = { status:'queued'|'running'|'completed'|'failed'|'unknown';promptId:string;queuePosition?:number;outputs:Array<{filename:string;subfolder:string;mediaType:string}>;error?:string }
 
 const modeContent = {
   text: { title: '文字生成视频', desc: '只需描述画面、镜头和声音，适合从零开始创作。' },
@@ -68,6 +70,11 @@ function App() {
   const [assets, setAssets] = useState<LocalAsset[]>([])
   const [assetError, setAssetError] = useState('')
   const [h3Patch, setH3Patch] = useState<H3PatchManifest | null>(null)
+  const [installingH3Patch, setInstallingH3Patch] = useState(false)
+  const [h3PatchMessage, setH3PatchMessage] = useState('')
+  const [h3PatchProgress, setH3PatchProgress] = useState<TransferProgress | null>(null)
+  const [activePromptId, setActivePromptId] = useState('')
+  const [generationPoll, setGenerationPoll] = useState<GenerationPoll | null>(null)
   const estimate = useMemo(() => duration <= 6 ? '约 8–12 分钟' : duration <= 10 ? '约 14–20 分钟' : '约 22–30 分钟', [duration])
 
   useEffect(() => {
@@ -80,9 +87,31 @@ function App() {
       listen<TransferProgress>('runtime-install-progress', event=>setRuntimeProgress(event.payload)),
       listen<ModelBundleFileEvent>('model-bundle-file', event=>{setModelFile(event.payload);setModelProgress(null)}),
       listen<ModelDownloadEvent>('model-download-progress', event=>setModelProgress(event.payload.progress)),
+      listen<TransferProgress>('h3-patch-download-progress', event=>setH3PatchProgress(event.payload)),
     ]).catch(()=>[] as Array<()=>void>)
     return ()=>{unlisteners.then(items=>items.forEach(fn=>fn()))}
   }, [])
+  useEffect(()=>{
+    if(!activePromptId) return
+    let stopped=false
+    const poll=async()=>{
+      try{
+        const value=await invoke<GenerationPoll>('comfy_poll_generation',{baseUrl:comfyUrl,promptId:activePromptId})
+        if(stopped) return
+        setGenerationPoll(value)
+        if(value.status==='completed'){
+          const saved:string[]=[]
+          for(const asset of value.outputs.filter(item=>item.mediaType==='video')){
+            saved.push(await invoke<string>('comfy_save_output',{baseUrl:comfyUrl,asset,outputDirectory:outputPath}))
+          }
+          setJobMessage(saved.length?`生成完成，已保存到 ${saved.join('、')}`:'生成完成，但历史记录中没有视频输出')
+          setActivePromptId('');setGenerating(false)
+        }else if(value.status==='failed'){setActivePromptId('');setGenerating(false)}
+      }catch(error){if(!stopped)setJobMessage(`读取生成状态失败：${String(error)}`)}
+    }
+    poll();const timer=setInterval(poll,3000)
+    return()=>{stopped=true;clearInterval(timer)}
+  },[activePromptId,comfyUrl,outputPath])
   const gpu = system?.gpu
   const gpuPercent = gpu ? Math.min(100, Math.round(gpu.memoryUsedMb / gpu.memoryTotalMb * 100)) : 31
   const h3Ready = !!probeResult && (h3Patch?.requiredNodes || []).every(node=>probeResult.h3RelatedNodes.includes(node))
@@ -121,12 +150,18 @@ function App() {
 
   const createGenerationJob = async () => {
     setGenerating(true); setJobMessage('')
-    const request = { mode, prompt, duration, width:1360, height:768, fps:24, quality:'standard', outputDirectory:outputPath }
+    if(!prompt.trim()){setJobMessage('请先填写视频描述');setGenerating(false);return}
+    if(mode==='frames'&&assets.length===0){setJobMessage('首尾帧模式至少需要选择一张图片');setGenerating(false);return}
+    if(mode==='reference'&&assets.length===0){setJobMessage('全模态参考模式至少需要选择一个素材');setGenerating(false);return}
+    const workflowMode=mode==='text'?'t2v':mode==='frames'?'fl2va':'ref2va'
+    const request = { mode:workflowMode, prompt, width:1344, height:768, durationSeconds:duration, seed:Date.now(), steps:20, referenceImageSize:'match', outputDirectory:outputPath, baseUrl:comfyUrl, assets:assets.map(({path,mime,kind,role})=>({path,mime,kind,role})) }
     try {
-      const job = await invoke<{id:string}>('create_job', { input:{ name:`${modeContent[mode].title} · ${new Date().toLocaleTimeString()}`, requestJson:JSON.stringify(request), backendId:'managed-comfy' } })
-      setJobMessage(`任务 ${job.id} 已加入本地队列`)
-    } catch { setJobMessage('浏览器原型：任务参数已通过界面校验') }
-    setTimeout(()=>setGenerating(false), 900)
+      setJobMessage(assets.length?'正在上传素材并编译工作流…':'正在编译并提交工作流…')
+      const started=await invoke<StartedGeneration>('start_h3_generation',{input:request})
+      const job = await invoke<{id:string}>('create_job', { input:{ name:`${modeContent[mode].title} · ${new Date().toLocaleTimeString()}`, requestJson:JSON.stringify({...request,promptId:started.promptId}), backendId:started.promptId } })
+      setActivePromptId(started.promptId);setGenerationPoll({status:'queued',promptId:started.promptId,queuePosition:started.queueNumber,outputs:[]})
+      setJobMessage(`任务 ${job.id} 已提交 ComfyUI${started.queueNumber!==undefined?` · 队列编号 ${started.queueNumber}`:''}`)
+    } catch(error) { setJobMessage(String(error));setGenerating(false) }
   }
 
   const openHistory = async () => {
@@ -159,6 +194,16 @@ function App() {
       setRuntimeMessage(`运行环境 ${current.version} 已安装并激活`)
     } catch(error) { setRuntimeMessage(String(error)) }
     finally { setInstallingRuntime('') }
+  }
+
+  const installH3Patch = async () => {
+    setInstallingH3Patch(true);setH3PatchMessage('');setH3PatchProgress({phase:'preparing',progressPercent:0})
+    try {
+      await invoke('runtime_install_h3_preview_patch')
+      setH3PatchProgress({phase:'completed',progressPercent:100})
+      setH3PatchMessage('H3 预览补丁与 Python 依赖已安装；请重启托管 Runtime 后重新检测。')
+    } catch(error) { setH3PatchMessage(String(error)) }
+    finally { setInstallingH3Patch(false) }
   }
 
   const installModelBundle = async () => {
@@ -229,14 +274,14 @@ function App() {
               </div>
 
               <button className="advanced-toggle" onClick={()=>setAdvanced(!advanced)}><span><Settings/> 高级设置 <small>采样、卸载与加速选项</small></span><ChevronDown className={advanced?'rotated':''}/></button>
-              {advanced && <div className="advanced-panel"><div><label>采样步数 <b>24</b></label><input type="range" min="12" max="50" defaultValue="24"/></div><div><label>显存策略</label><button className="select"><span>自动平衡</span><ChevronDown/></button></div><div><label>加速方案</label><button className="select"><span><Zap/> SageAttention · 已兼容</span><ChevronDown/></button></div></div>}
+              {advanced && <div className="advanced-panel"><div><label>采样步数 <b>20</b></label><input type="range" min="12" max="50" defaultValue="20"/></div><div><label>显存策略</label><button className="select"><span>自动平衡（运行时检测）</span><ChevronDown/></button></div><div><label>加速方案</label><button className="select"><span><Zap/> 自动选择（安装后检测）</span><ChevronDown/></button></div></div>}
             </section>
 
             <aside className="summary-card">
               <div className="preview"><div className="preview-art"><div className="orbit one"/><div className="orbit two"/><Aperture/><span>生成预览将在这里显示</span></div><button className="expand">↗</button></div>
               <div className="summary-body"><h2>生成准备</h2><div className="summary-row"><span><Cpu/> 运行方案</span><strong>单卡优化</strong></div><div className="summary-row"><span><HardDrive/> 预计显存</span><strong className="good">约 19.6 GB</strong></div><div className="summary-row"><span><Clock3/> 预计耗时</span><strong>{estimate}</strong></div><div className="summary-row"><span><FolderOpen/> 保存到</span><button onClick={()=>setSettingsDialog(true)}>{outputPath} <ChevronRight/></button></div>
-                <div className="fit-notice"><ShieldCheck/><span><strong>适合当前设备</strong><small>已自动启用模型卸载与分块解码</small></span></div>
-                <button className="generate" onClick={createGenerationJob} disabled={generating}>{generating ? <><span className="spinner"/> 正在创建任务…</> : <><Play/> 开始生成视频</>}</button><p className="queue-note">{jobMessage || '当前队列中有 1 个任务，预计等待 3 分钟'}</p>
+                <div className="fit-notice"><ShieldCheck/><span><strong>{gpu&&gpu.memoryTotalMb>=24000?'达到建议显存':'需要兼容性实测'}</strong><small>{gpu?`${(gpu.memoryTotalMb/1024).toFixed(0)}GB 显存 · 建议 24GB 显存与 64GB 内存`:'未检测到 NVIDIA 显卡信息'}</small></span></div>
+                <button className="generate" onClick={createGenerationJob} disabled={generating||!h3Ready}>{generating ? <><span className="spinner"/> {generationPoll?.status==='running'?'正在生成视频…':generationPoll?.status==='queued'?'正在排队…':'正在提交素材…'}</> : <><Play/> {h3Ready?'开始生成视频':'请先连接 H3 运行环境'}</>}</button><p className="queue-note">{generationPoll?.status==='failed'?`生成失败：${generationPoll.error||'ComfyUI 执行错误'}`:jobMessage || (h3Ready?'运行环境已通过 H3 节点校验':'在“运行环境”中安装或连接 ComfyUI，并验证 H3 必需节点')}</p>
               </div>
             </aside>
           </div>
@@ -259,7 +304,9 @@ function App() {
           <div className="url-row"><input id="comfy-url" value={comfyUrl} onChange={e=>setComfyUrl(e.target.value)} /><button onClick={testComfy} disabled={probing}>{probing?'正在检测…':'测试连接'}</button></div>
           {probeError && <div className="probe-message error"><Info/><span><strong>连接未通过</strong><small>{probeError}</small></span></div>}
           {probeResult && <div className={`probe-message ${h3Ready?'success':'error'}`}><ShieldCheck/><span><strong>{h3Ready?'H3 运行节点完整':'ComfyUI 可连接，但尚不能运行 H3'}</strong><small>{h3Ready?`已验证 ${h3Patch?.requiredNodes.length||0} 个必需节点 · ${probeResult.latencyMs} ms`:`缺少 H3 必需节点；基础 Runtime v0.30.0 需要应用上游 PR #${h3Patch?.pullRequest||15224} 预览补丁`}</small></span></div>}
-          {h3Patch && <div className="patch-notice"><Info/><span><strong>H3 当前依赖上游预览实现</strong><small>固定提交 {h3Patch.commit.slice(0,8)} · 下载后校验 SHA-256 · 正在开发可回滚安装</small></span></div>}
+          {h3Patch && !h3Ready && <div className="patch-notice"><Info/><span><strong>H3 当前依赖上游预览实现</strong><small>固定提交 {h3Patch.commit.slice(0,8)} · 下载后校验 SHA-256 · 安装失败自动回滚</small></span><button onClick={installH3Patch} disabled={installingH3Patch}>{installingH3Patch?'安装中…':'安装 H3 补丁'}</button></div>}
+          {h3PatchProgress && installingH3Patch && <div className="runtime-progress"><div><span>下载 H3 补丁</span><strong>{Math.round(h3PatchProgress.progressPercent||0)}%</strong></div><div className="progress"><span style={{width:`${h3PatchProgress.progressPercent||0}%`}}/></div><small>{h3PatchProgress.bytesPerSecond?`${(h3PatchProgress.bytesPerSecond/1024/1024).toFixed(1)} MB/s`:'正在准备'} {h3PatchProgress.etaSeconds?`· 剩余约 ${Math.ceil(h3PatchProgress.etaSeconds/60)} 分钟`:''}</small></div>}
+          {h3PatchMessage && <div className={`probe-message ${h3PatchMessage.includes('已安装')?'success':'error'}`}><ShieldCheck/><span><strong>{h3PatchMessage.includes('已安装')?'补丁安装完成':'补丁安装未完成'}</strong><small>{h3PatchMessage}</small></span></div>}
           <div className="modal-note"><ShieldCheck/><span><strong>本地连接保护</strong><small>MVP 仅探测 127.0.0.1、localhost 或 ::1，避免意外访问不可信远端服务。</small></span></div>
         </section>
       </div>}

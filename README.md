@@ -31,7 +31,9 @@ Windows 桌面开发：`cd app; npm run desktop:dev`
 
 Windows Setup 构建需从 Visual Studio x64 Developer Command Prompt 执行：`cd app; npm run desktop:build`
 
-当前验证安装包位于 `release/v0.5.0/Langbai-H3-Studio_0.5.0_x64-setup.exe`。
+当前预览安装包位于 `release/v0.6.0/Langbai-H3-Studio_0.6.0_x64-setup.exe`。SHA-256：`1DA5FDBFC8B8777E0EA6FF271AB313819AE4197F98C59E2081D8E27661C4646A`。
+
+`v0.6.0` 首次接通官方 H3 API Graph、素材上传、任务提交、状态轮询和结果保存；真实 H3 GPU 生成仍需按兼容性文档完成固定上游预览补丁与硬件实测，因此该版本以 GitHub Pre-release 发布。
 
 ## 文档
 

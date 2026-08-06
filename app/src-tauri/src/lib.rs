@@ -12,6 +12,8 @@ use url::Url;
 mod comfy;
 mod comfy_transport;
 mod download;
+mod h3_patch;
+mod h3_workflow;
 mod job_store;
 mod model_bundle;
 mod model_store;
@@ -125,6 +127,207 @@ fn runtime_manifests() -> Result<Vec<runtime_installer::RuntimeManifest>, String
 fn h3_preview_patch_manifest() -> Result<serde_json::Value, String> {
     serde_json::from_str(H3_PREVIEW_PATCH_MANIFEST)
         .map_err(|e| format!("内置 H3 补丁清单损坏：{e}"))
+}
+
+#[tauri::command]
+fn build_h3_workflow(request: h3_workflow::H3WorkflowRequest) -> Result<serde_json::Value, String> {
+    h3_workflow::build_h3_prompt(&request)
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalH3Asset {
+    path: String,
+    mime: String,
+    kind: h3_workflow::H3AssetKind,
+    role: h3_workflow::H3AssetRole,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StartH3GenerationInput {
+    base_url: String,
+    mode: h3_workflow::H3Mode,
+    prompt: String,
+    width: u32,
+    height: u32,
+    duration_seconds: f32,
+    seed: u64,
+    steps: u32,
+    reference_image_size: String,
+    output_directory: String,
+    assets: Vec<LocalH3Asset>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StartedH3Generation {
+    prompt_id: String,
+    queue_number: Option<u64>,
+    uploaded_assets: usize,
+    filename_prefix: String,
+    output_directory: String,
+}
+
+#[tauri::command]
+async fn start_h3_generation(input: StartH3GenerationInput) -> Result<StartedH3Generation, String> {
+    let output_directory = validate_output_path(input.output_directory)?;
+    let transport =
+        comfy_transport::ComfyTransport::new(&input.base_url, Duration::from_secs(60 * 60 * 2))?;
+    let object_info = transport.get_object_info().await?;
+    let available = object_info
+        .as_object()
+        .ok_or_else(|| "ComfyUI 节点能力响应格式无效".to_string())?;
+    let job_token = format!(
+        "{:x}{:x}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+        rand::random::<u32>()
+    );
+    let subfolder = format!("langbai-h3/{job_token}");
+    let mut uploaded = Vec::with_capacity(input.assets.len());
+    for asset in input.assets {
+        let canonical =
+            std::fs::canonicalize(&asset.path).map_err(|e| format!("读取素材失败：{e}"))?;
+        let (_, expected_mime) =
+            asset_type(&canonical).ok_or_else(|| "素材格式不受支持".to_string())?;
+        if asset.mime != expected_mime {
+            return Err("素材类型与扩展名不一致".into());
+        }
+        let receipt = transport
+            .upload_input_path(&canonical, expected_mime, Some(&subfolder), false)
+            .await?;
+        let remote_path = if receipt.subfolder.is_empty() {
+            receipt.name
+        } else {
+            format!("{}/{}", receipt.subfolder.replace('\\', "/"), receipt.name)
+        };
+        uploaded.push(h3_workflow::UploadedAsset {
+            remote_path,
+            kind: asset.kind,
+            role: asset.role,
+        });
+    }
+    let filename_prefix = format!("video/Langbai_H3_{job_token}");
+    let request = h3_workflow::H3WorkflowRequest {
+        mode: input.mode,
+        prompt: input.prompt,
+        width: input.width,
+        height: input.height,
+        duration_seconds: input.duration_seconds,
+        seed: input.seed,
+        steps: input.steps,
+        reference_image_size: input.reference_image_size,
+        assets: uploaded,
+        filename_prefix: filename_prefix.clone(),
+    };
+    let workflow = h3_workflow::build_h3_prompt(&request)?;
+    let missing = workflow
+        .as_object()
+        .into_iter()
+        .flat_map(|nodes| nodes.values())
+        .filter_map(|node| node.get("class_type").and_then(serde_json::Value::as_str))
+        .filter(|node_type| !available.contains_key(*node_type))
+        .collect::<std::collections::BTreeSet<_>>();
+    if !missing.is_empty() {
+        return Err(format!(
+            "当前 ComfyUI 缺少工作流节点：{}",
+            missing.into_iter().collect::<Vec<_>>().join("、")
+        ));
+    }
+    let receipt = transport.post_prompt(workflow, &job_token).await?;
+    if receipt.validation_error_count > 0 {
+        return Err(format!(
+            "ComfyUI 拒绝了工作流：{} 个节点参数未通过校验",
+            receipt.validation_error_count
+        ));
+    }
+    Ok(StartedH3Generation {
+        prompt_id: receipt.prompt_id,
+        queue_number: receipt.queue_number,
+        uploaded_assets: request.assets.len(),
+        filename_prefix,
+        output_directory,
+    })
+}
+
+#[tauri::command]
+async fn runtime_install_h3_preview_patch(
+    app: tauri::AppHandle,
+) -> Result<h3_patch::PatchReceipt, String> {
+    let value: serde_json::Value = serde_json::from_str(H3_PREVIEW_PATCH_MANIFEST)
+        .map_err(|e| format!("内置 H3 补丁清单损坏：{e}"))?;
+    let manifest: h3_patch::H3PatchManifest =
+        serde_json::from_value(value.clone()).map_err(|e| format!("H3 补丁清单字段无效：{e}"))?;
+    let url = value
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "H3 补丁清单缺少下载地址".to_string())?;
+    let current = runtime_manager::RuntimeManager::new(runtime_root())
+        .current()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "请先安装托管 ComfyUI 基础运行环境".to_string())?;
+    let request = download::DownloadRequest {
+        source_url: url.into(),
+        relative_path: PathBuf::from("downloads").join(format!("{}.zip", manifest.id)),
+        expected_sha256: manifest.sha256.clone(),
+    };
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60 * 30))
+        .build()
+        .map_err(|e| format!("创建 H3 补丁下载客户端失败：{e}"))?;
+    let archive = download::download_model(&client, &runtime_root(), &request, |progress| {
+        let _ = app.emit("h3-patch-download-progress", progress);
+    })
+    .await?
+    .path;
+    let receipt = h3_patch::install_h3_patch(&manifest, &archive, &current.profile_dir)?;
+    let portable = current.profile_dir.join("ComfyUI_windows_portable");
+    let python = portable.join("python_embeded").join("python.exe");
+    let requirements = portable.join("ComfyUI").join("requirements.txt");
+    let output = Command::new(&python)
+        .args(["-s", "-m", "pip", "install", "-r"])
+        .arg(&requirements)
+        .output()
+        .map_err(|e| format!("启动 H3 依赖安装失败：{e}"));
+    match output {
+        Ok(result) if result.status.success() => Ok(receipt),
+        Ok(result) => {
+            let detail = String::from_utf8_lossy(&result.stderr);
+            let _ = h3_patch::rollback_h3_patch(&receipt.receipt_path);
+            Err(format!(
+                "H3 依赖安装失败，源码补丁已回滚：{}",
+                detail.chars().take(600).collect::<String>()
+            ))
+        }
+        Err(error) => {
+            let _ = h3_patch::rollback_h3_patch(&receipt.receipt_path);
+            Err(error)
+        }
+    }
+}
+
+#[tauri::command]
+fn runtime_rollback_h3_preview_patch() -> Result<(), String> {
+    let value: serde_json::Value = serde_json::from_str(H3_PREVIEW_PATCH_MANIFEST)
+        .map_err(|e| format!("内置 H3 补丁清单损坏：{e}"))?;
+    let id = value
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "H3 补丁清单缺少 ID".to_string())?;
+    let current = runtime_manager::RuntimeManager::new(runtime_root())
+        .current()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "尚未安装托管 ComfyUI".to_string())?;
+    h3_patch::rollback_h3_patch(
+        &current
+            .profile_dir
+            .join(".h3-patches")
+            .join(id)
+            .join("receipt.json"),
+    )
 }
 
 #[tauri::command]
@@ -517,6 +720,24 @@ async fn comfy_poll_generation(
 }
 
 #[tauri::command]
+async fn comfy_save_output(
+    base_url: String,
+    asset: comfy::OutputAsset,
+    output_directory: String,
+) -> Result<String, String> {
+    let output_directory = validate_output_path(output_directory)?;
+    comfy_transport::ComfyTransport::new(&base_url, Duration::from_secs(60 * 60))?
+        .download_output(
+            &asset.filename,
+            &asset.subfolder,
+            "output",
+            std::path::Path::new(&output_directory),
+        )
+        .await
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
 async fn comfy_interrupt(base_url: String) -> Result<(), String> {
     comfy_transport::ComfyTransport::new(&base_url, Duration::from_secs(15))?
         .interrupt()
@@ -839,6 +1060,10 @@ pub fn run() {
             runtime_get_current,
             runtime_manifests,
             h3_preview_patch_manifest,
+            build_h3_workflow,
+            start_h3_generation,
+            runtime_install_h3_preview_patch,
+            runtime_rollback_h3_preview_patch,
             runtime_download_install_activate,
             runtime_prepare_staging,
             runtime_activate_staged,
@@ -855,6 +1080,7 @@ pub fn run() {
             comfy_get_queue,
             comfy_get_history,
             comfy_poll_generation,
+            comfy_save_output,
             comfy_interrupt,
             inspect_input_files,
             comfy_upload_input,

@@ -9,6 +9,7 @@ use serde_json::Value;
 use std::net::IpAddr;
 use std::path::Path;
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 
 #[derive(Clone)]
 pub struct ComfyTransport {
@@ -74,6 +75,14 @@ impl ComfyTransport {
     pub async fn get_queue(&self) -> Result<Value, String> {
         self.request_json(self.client.get(self.endpoint("queue")?), "读取任务队列")
             .await
+    }
+
+    pub async fn get_object_info(&self) -> Result<Value, String> {
+        self.request_json(
+            self.client.get(self.endpoint("object_info")?),
+            "读取 ComfyUI 节点能力",
+        )
+        .await
     }
 
     pub async fn get_history(&self, prompt_id: &str) -> Result<Value, String> {
@@ -207,6 +216,82 @@ impl ComfyTransport {
                 .unwrap_or("input")
                 .to_owned(),
         })
+    }
+
+    pub async fn download_output(
+        &self,
+        filename: &str,
+        subfolder: &str,
+        kind: &str,
+        destination: &Path,
+    ) -> Result<std::path::PathBuf, String> {
+        if filename.is_empty() || filename.contains(['/', '\\']) {
+            return Err("ComfyUI 输出文件名无效".into());
+        }
+        let relative = Path::new(subfolder);
+        if (!subfolder.is_empty()
+            && (relative.is_absolute()
+                || relative
+                    .components()
+                    .any(|component| !matches!(component, std::path::Component::Normal(_)))))
+            || kind != "output"
+        {
+            return Err("ComfyUI 输出路径无效".into());
+        }
+        tokio::fs::create_dir_all(destination)
+            .await
+            .map_err(|e| format!("创建视频保存目录失败：{e}"))?;
+        let target = destination.join(filename);
+        let temporary = target.with_extension(format!(
+            "{}.part",
+            target
+                .extension()
+                .and_then(|v| v.to_str())
+                .unwrap_or("media")
+        ));
+        let mut endpoint = self.endpoint("view")?;
+        endpoint
+            .query_pairs_mut()
+            .append_pair("filename", filename)
+            .append_pair("subfolder", subfolder)
+            .append_pair("type", kind);
+        let mut response = self
+            .client
+            .get(endpoint)
+            .send()
+            .await
+            .map_err(|e| network_error("保存生成结果", e))?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "保存生成结果失败：ComfyUI 返回 HTTP {}",
+                response.status()
+            ));
+        }
+        let mut file = tokio::fs::File::create(&temporary)
+            .await
+            .map_err(|e| format!("创建结果文件失败：{e}"))?;
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| network_error("读取生成结果", e))?
+        {
+            file.write_all(&chunk)
+                .await
+                .map_err(|e| format!("写入生成结果失败：{e}"))?;
+        }
+        file.flush()
+            .await
+            .map_err(|e| format!("写入生成结果失败：{e}"))?;
+        drop(file);
+        if target.exists() {
+            tokio::fs::remove_file(&target)
+                .await
+                .map_err(|e| format!("替换旧结果失败：{e}"))?;
+        }
+        tokio::fs::rename(&temporary, &target)
+            .await
+            .map_err(|e| format!("提交生成结果失败：{e}"))?;
+        Ok(target)
     }
 
     fn endpoint(&self, path: &str) -> Result<Url, String> {

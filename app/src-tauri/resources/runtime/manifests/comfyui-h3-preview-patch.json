@@ -4,6 +4,7 @@
   "pullRequest": 15224,
   "url": "https://github.com/Comfy-Org/ComfyUI/archive/e2ab36d933356bc8cd6ecb39c655fe8be75af4e5.zip",
   "sha256": "a2c92278f362c5af218a3da1b6f21a03eedcd9f814139a186b2d68eff407d66d",
+  "archiveFormat": "zip",
   "size": 12279194,
   "requiredNodes": [
     "MiniMaxH3ImageToVideo",
