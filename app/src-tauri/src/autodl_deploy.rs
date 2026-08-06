@@ -22,6 +22,7 @@ use crate::{model_bundle, ssh_tunnel::SshTunnelConfig};
 pub const TARGET_ROOT: &str = "/workspace/LangbaiH3Studio";
 pub const REMOTE_COMMAND: &str = "sh -s -- langbai-h3-deploy-v1";
 pub const STATUS_REMOTE_COMMAND: &str = "sh -s -- langbai-h3-status-v1";
+pub const ROLLBACK_REMOTE_COMMAND: &str = "sh -s -- langbai-h3-rollback-v1";
 const MAX_PROTOCOL_BYTES: usize = 256 * 1024;
 
 pub const DEPLOY_SCRIPT: &str = r#"set -eu
@@ -50,6 +51,22 @@ case "${DEPLOYMENT_ID:-}" in (h3-[a-f0-9]*) ;; (*) exit 64;; esac
 JOURNAL="$ROOT/state/deployments/$DEPLOYMENT_ID/journal.tsv"
 [ -f "$JOURNAL" ] || exit 66
 cat "$JOURNAL"
+"#;
+
+pub const ROLLBACK_SCRIPT: &str = r#"set -eu
+ROOT=/workspace/LangbaiH3Studio
+case "${DEPLOYMENT_ID:-}" in (h3-[a-f0-9]*) ;; (*) exit 64;; esac
+DIR="$ROOT/state/deployments/$DEPLOYMENT_ID"
+JOURNAL="$DIR/journal.tsv"
+[ -f "$DIR/manifest.json" ] && [ -f "$JOURNAL" ] || exit 66
+if find "$DIR" -mindepth 1 -type f ! -name manifest.json ! -name journal.tsv -print | grep -q .; then exit 65; fi
+last="$(tail -n 1 "$JOURNAL" | cut -f2)"
+case "$last" in (''|*[!0-9]*) exit 65;; esac
+emit() { printf 'event\t%s\t%s\t%s\n' "$1" "$2" "$(printf '%s' "$3" | base64 | tr -d '\n')"; }
+emit "$((last+1))" rolling_back '正在回滚 Studio 隔离准备目录'
+rm -f "$DIR/manifest.json" "$DIR/journal.tsv"
+rmdir "$DIR/logs" "$DIR"
+emit "$((last+2))" completed '隔离准备目录已精确回滚'
 "#;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -379,6 +396,21 @@ pub fn build_status_launch_plan(
     })
 }
 
+pub fn build_rollback_launch_plan(
+    config: &SshTunnelConfig,
+    program: PathBuf,
+    deployment_id: &str,
+) -> Result<DeployLaunchPlan, String> {
+    let mut launch = build_status_launch_plan(config, program, deployment_id)?;
+    *launch
+        .args
+        .last_mut()
+        .ok_or("SSH \u{547d}\u{4ee4}\u{4e3a}\u{7a7a}")? = ROLLBACK_REMOTE_COMMAND.into();
+    launch.stdin = format!("DEPLOYMENT_ID='{}'\n{}", deployment_id, ROLLBACK_SCRIPT).into_bytes();
+    launch.script_sha256 = format!("{:x}", Sha256::digest(ROLLBACK_SCRIPT.as_bytes()));
+    Ok(launch)
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoDlDeployPrepareResult {
@@ -524,6 +556,23 @@ pub async fn autodl_deploy_status(
         })?
 }
 
+#[tauri::command]
+pub async fn autodl_deploy_rollback(
+    config: SshTunnelConfig,
+    deployment_id: String,
+) -> Result<Vec<AutoDlDeployProgress>, String> {
+    let launch = build_rollback_launch_plan(
+        &config,
+        crate::ssh_tunnel::system_ssh_path()?,
+        &deployment_id,
+    )?;
+    tauri::async_runtime::spawn_blocking(move || run_prepare(launch))
+        .await
+        .map_err(|_| {
+            "AutoDL \u{8fdc}\u{7aef}\u{56de}\u{6eda}\u{4efb}\u{52a1}\u{5f02}\u{5e38}".to_string()
+        })?
+}
+
 fn stage(value: &str) -> Option<DeployStage> {
     Some(match value {
         "preflight" => DeployStage::Preflight,
@@ -665,5 +714,18 @@ mod tests {
                 .contains("DEPLOYMENT_ID='h3-0123456789abcdefabcd'")
         );
         assert!(build_status_launch_plan(&c, "ssh.exe".into(), "../../etc").is_err());
+    }
+
+    #[test]
+    fn rollback_is_exact_and_uses_a_fixed_command() {
+        let t = tempdir().unwrap();
+        let c = cfg(t.path());
+        let launch =
+            build_rollback_launch_plan(&c, "ssh.exe".into(), "h3-0123456789abcdefabcd").unwrap();
+        assert_eq!(launch.args.last().unwrap(), ROLLBACK_REMOTE_COMMAND);
+        let script = String::from_utf8(launch.stdin).unwrap();
+        assert!(script.contains("rm -f \"$DIR/manifest.json\" \"$DIR/journal.tsv\""));
+        assert!(!script.contains("rm -rf"));
+        assert!(!launch.args.join(" ").contains("h3-0123456789abcdefabcd"));
     }
 }

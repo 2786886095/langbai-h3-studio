@@ -1437,6 +1437,7 @@ pub fn run() {
             autodl_deploy::autodl_deploy_preflight,
             autodl_deploy::autodl_deploy_prepare,
             autodl_deploy::autodl_deploy_status,
+            autodl_deploy::autodl_deploy_rollback,
             comfy_submit_prompt,
             comfy_get_queue,
             comfy_get_history,
