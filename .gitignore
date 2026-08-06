@@ -1,0 +1,10 @@
+node_modules/
+dist/
+target/
+*.log
+*.part
+.env
+.env.*
+app/screenshot.cjs
+app/make_icon.py
+
