@@ -7,8 +7,13 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashSet},
     fs,
+    io::{Read, Write},
     net::IpAddr,
     path::{Path, PathBuf},
+    process::{Command, Stdio},
+    sync::mpsc,
+    thread,
+    time::Duration,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -23,8 +28,9 @@ umask 077
 ROOT=/workspace/LangbaiH3Studio
 STATE="$ROOT/state/deployments"
 case "${CONFIG_B64:-}" in (*[!A-Za-z0-9+/=]*|'') exit 64;; esac
+case "${DEPLOYMENT_ID:-}" in (h3-[a-f0-9]*) ;; (*) exit 64;; esac
 CONFIG="$(printf '%s' "$CONFIG_B64" | base64 -d)"
-ID="$(printf '%s' "$CONFIG" | sha256sum | cut -c1-24)"
+ID="$DEPLOYMENT_ID"
 DIR="$STATE/$ID"
 mkdir -p "$DIR/logs" "$ROOT/staging" "$ROOT/models"
 printf '%s' "$CONFIG" > "$DIR/manifest.json.tmp"
@@ -280,12 +286,143 @@ pub fn build_deploy_launch_plan(
     .collect();
     let json = serde_json::to_vec(plan)
         .map_err(|_| "\u{90e8}\u{7f72}\u{8ba1}\u{5212}\u{5e8f}\u{5217}\u{5316}\u{5931}\u{8d25}")?;
-    let stdin = format!("CONFIG_B64='{}'\n{}", BASE64.encode(json), DEPLOY_SCRIPT).into_bytes();
+    let stdin = format!(
+        "CONFIG_B64='{}'\nDEPLOYMENT_ID='{}'\n{}",
+        BASE64.encode(json),
+        plan.deployment_id,
+        DEPLOY_SCRIPT
+    )
+    .into_bytes();
     Ok(DeployLaunchPlan {
         program,
         args,
         stdin,
         script_sha256: format!("{:x}", Sha256::digest(DEPLOY_SCRIPT.as_bytes())),
+    })
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoDlDeployPrepareResult {
+    pub plan: AutoDlDeployPlan,
+    pub progress: Vec<AutoDlDeployProgress>,
+    pub script_sha256: String,
+}
+
+fn read_limited(mut reader: impl Read + Send + 'static) -> mpsc::Receiver<Vec<u8>> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut output = Vec::new();
+        let mut buffer = [0u8; 4096];
+        while output.len() <= MAX_PROTOCOL_BYTES {
+            match reader.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => output.extend_from_slice(&buffer[..n]),
+            }
+        }
+        let _ = tx.send(output);
+    });
+    rx
+}
+
+fn run_prepare(launch: DeployLaunchPlan) -> Result<Vec<AutoDlDeployProgress>, String> {
+    let mut command = Command::new(&launch.program);
+    command
+        .args(&launch.args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|_| "\u{542f}\u{52a8} Windows OpenSSH \u{5931}\u{8d25}".to_string())?;
+    child
+        .stdin
+        .take()
+        .ok_or("\u{65e0}\u{6cd5}\u{5199}\u{5165} SSH stdin")?
+        .write_all(&launch.stdin)
+        .map_err(
+            |_| "\u{53d1}\u{9001}\u{56fa}\u{5b9a}\u{90e8}\u{7f72}\u{811a}\u{672c}\u{5931}\u{8d25}",
+        )?;
+    let stdout = read_limited(
+        child
+            .stdout
+            .take()
+            .ok_or("\u{65e0}\u{6cd5}\u{8bfb}\u{53d6} SSH stdout")?,
+    );
+    let stderr = read_limited(
+        child
+            .stderr
+            .take()
+            .ok_or("\u{65e0}\u{6cd5}\u{8bfb}\u{53d6} SSH stderr")?,
+    );
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|_| "\u{8bfb}\u{53d6} SSH \u{72b6}\u{6001}\u{5931}\u{8d25}")?
+        {
+            break status;
+        }
+        if started.elapsed() >= Duration::from_secs(45) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("AutoDL \u{8fdc}\u{7aef}\u{51c6}\u{5907}\u{8d85}\u{65f6}".into());
+        }
+        thread::sleep(Duration::from_millis(50));
+    };
+    let out = stdout
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap_or_default();
+    let err = stderr
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap_or_default();
+    if !status.success() {
+        let detail = String::from_utf8_lossy(&err);
+        let summary = detail.lines().last().unwrap_or_default().trim();
+        return Err(if summary.is_empty() {
+            "AutoDL \u{8fdc}\u{7aef}\u{51c6}\u{5907}\u{5931}\u{8d25}".into()
+        } else {
+            format!(
+                "AutoDL \u{8fdc}\u{7aef}\u{51c6}\u{5907}\u{5931}\u{8d25}\u{ff1a}{}",
+                summary.chars().take(240).collect::<String>()
+            )
+        });
+    }
+    let progress = parse_progress(&out)?;
+    if !matches!(
+        progress.last().map(|item| &item.stage),
+        Some(DeployStage::Completed)
+    ) {
+        return Err("AutoDL \u{8fdc}\u{7aef}\u{51c6}\u{5907}\u{672a}\u{8fd4}\u{56de}\u{5b8c}\u{6210}\u{4e8b}\u{4ef6}".into());
+    }
+    Ok(progress)
+}
+
+#[tauri::command]
+pub async fn autodl_deploy_prepare(
+    input: AutoDlDeployPreflightInput,
+) -> Result<AutoDlDeployPrepareResult, String> {
+    let plan = build_preflight(&input)?;
+    let launch = build_deploy_launch_plan(
+        &input.connection,
+        crate::ssh_tunnel::system_ssh_path()?,
+        &plan,
+    )?;
+    let script_sha256 = launch.script_sha256.clone();
+    let progress = tauri::async_runtime::spawn_blocking(move || run_prepare(launch))
+        .await
+        .map_err(|_| {
+            "AutoDL \u{8fdc}\u{7aef}\u{51c6}\u{5907}\u{4efb}\u{52a1}\u{5f02}\u{5e38}".to_string()
+        })??;
+    Ok(AutoDlDeployPrepareResult {
+        plan,
+        progress,
+        script_sha256,
     })
 }
 

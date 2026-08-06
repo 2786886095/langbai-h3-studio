@@ -1435,6 +1435,7 @@ pub fn run() {
             ssh_tunnel::ssh_tunnel_stop,
             autodl_remote::autodl_remote_probe,
             autodl_deploy::autodl_deploy_preflight,
+            autodl_deploy::autodl_deploy_prepare,
             comfy_submit_prompt,
             comfy_get_queue,
             comfy_get_history,

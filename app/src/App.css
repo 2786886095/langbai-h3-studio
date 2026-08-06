@@ -46,3 +46,5 @@ button:focus-visible,textarea:focus-visible{outline:2px solid var(--primary);out
 .deploy-plan-card>div:first-child{display:flex;flex-direction:column;gap:4px}.deploy-plan-card small{color:var(--text-secondary)}
 .deploy-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.deploy-metrics span{display:flex;flex-direction:column;gap:3px;padding:10px;border-radius:9px;background:var(--surface-subtle);font-size:12px}.deploy-metrics b{font-size:16px;color:var(--text-primary)}
 .deploy-boundary{line-height:1.6}@media(max-width:760px){.autodl-variant-row,.deploy-metrics{grid-template-columns:1fr}}
+
+.autodl-prepare-button{margin-top:12px;min-height:44px}.deploy-journal{display:flex;align-items:flex-start;gap:10px;margin-top:10px;padding:12px;border-radius:10px;background:var(--success-soft);color:var(--text-primary)}.deploy-journal svg{width:18px;flex:none;color:var(--success)}.deploy-journal span{display:flex;flex-direction:column;gap:3px}.deploy-journal small{color:var(--text-secondary);line-height:1.5}
