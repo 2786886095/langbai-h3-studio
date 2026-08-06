@@ -21,6 +21,7 @@ use crate::{model_bundle, ssh_tunnel::SshTunnelConfig};
 
 pub const TARGET_ROOT: &str = "/workspace/LangbaiH3Studio";
 pub const REMOTE_COMMAND: &str = "sh -s -- langbai-h3-deploy-v1";
+pub const STATUS_REMOTE_COMMAND: &str = "sh -s -- langbai-h3-status-v1";
 const MAX_PROTOCOL_BYTES: usize = 256 * 1024;
 
 pub const DEPLOY_SCRIPT: &str = r#"set -eu
@@ -35,9 +36,20 @@ DIR="$STATE/$ID"
 mkdir -p "$DIR/logs" "$ROOT/staging" "$ROOT/models"
 printf '%s' "$CONFIG" > "$DIR/manifest.json.tmp"
 mv "$DIR/manifest.json.tmp" "$DIR/manifest.json"
-emit() { printf 'event\t%s\t%s\t%s\n' "$1" "$2" "$(printf '%s' "$3" | base64 | tr -d '\n')"; }
+emit() {
+  encoded="$(printf '%s' "$3" | base64 | tr -d '\n')"
+  printf 'event\t%s\t%s\t%s\n' "$1" "$2" "$encoded" | tee -a "$DIR/journal.tsv"
+}
 emit 1 preflight '部署配置已写入隔离目录'
 emit 2 completed '预检阶段完成'
+"#;
+
+pub const STATUS_SCRIPT: &str = r#"set -eu
+ROOT=/workspace/LangbaiH3Studio
+case "${DEPLOYMENT_ID:-}" in (h3-[a-f0-9]*) ;; (*) exit 64;; esac
+JOURNAL="$ROOT/state/deployments/$DEPLOYMENT_ID/journal.tsv"
+[ -f "$JOURNAL" ] || exit 66
+cat "$JOURNAL"
 "#;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -207,6 +219,16 @@ pub fn build_preflight(input: &AutoDlDeployPreflightInput) -> Result<AutoDlDeplo
     })
 }
 
+fn validate_deployment_id(value: &str) -> Result<(), String> {
+    if value.len() != 23
+        || !value.starts_with("h3-")
+        || !value[3..].bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("\u{90e8}\u{7f72}\u{7f16}\u{53f7}\u{65e0}\u{6548}".into());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn autodl_deploy_preflight(
     input: AutoDlDeployPreflightInput,
@@ -298,6 +320,62 @@ pub fn build_deploy_launch_plan(
         args,
         stdin,
         script_sha256: format!("{:x}", Sha256::digest(DEPLOY_SCRIPT.as_bytes())),
+    })
+}
+
+pub fn build_status_launch_plan(
+    config: &SshTunnelConfig,
+    program: PathBuf,
+    deployment_id: &str,
+) -> Result<DeployLaunchPlan, String> {
+    validate_deployment_id(deployment_id)?;
+    if !valid_atom(&config.host, true) || !valid_atom(&config.user, false) || config.port == 0 {
+        return Err("SSH \u{8fde}\u{63a5}\u{53c2}\u{6570}\u{65e0}\u{6548}".into());
+    }
+    let key = canonical_file(&config.identity_file, "SSH \u{79c1}\u{94a5}")?;
+    let hosts = canonical_file(&config.known_hosts_file, "known_hosts")?;
+    if fs::metadata(&hosts).map_err(|e| e.to_string())?.len() == 0 {
+        return Err("known_hosts \u{4e0d}\u{80fd}\u{4e3a}\u{7a7a}".into());
+    }
+    let destination = if config.host.contains(':') {
+        format!("{}@[{}]", config.user, config.host)
+    } else {
+        format!("{}@{}", config.user, config.host)
+    };
+    let args = vec![
+        "-F".to_string(),
+        "NUL".into(),
+        "-T".into(),
+        "-p".into(),
+        config.port.to_string(),
+        "-i".into(),
+        key.to_string_lossy().into_owned(),
+        "-o".into(),
+        "BatchMode=yes".into(),
+        "-o".into(),
+        "PasswordAuthentication=no".into(),
+        "-o".into(),
+        "KbdInteractiveAuthentication=no".into(),
+        "-o".into(),
+        "IdentitiesOnly=yes".into(),
+        "-o".into(),
+        "ForwardAgent=no".into(),
+        "-o".into(),
+        "ClearAllForwardings=yes".into(),
+        "-o".into(),
+        "StrictHostKeyChecking=yes".into(),
+        "-o".into(),
+        format!("UserKnownHostsFile={}", hosts.to_string_lossy()),
+        "-o".into(),
+        "GlobalKnownHostsFile=NUL".into(),
+        destination,
+        STATUS_REMOTE_COMMAND.into(),
+    ];
+    Ok(DeployLaunchPlan {
+        program,
+        args,
+        stdin: format!("DEPLOYMENT_ID='{}'\n{}", deployment_id, STATUS_SCRIPT).into_bytes(),
+        script_sha256: format!("{:x}", Sha256::digest(STATUS_SCRIPT.as_bytes())),
     })
 }
 
@@ -406,8 +484,11 @@ fn run_prepare(launch: DeployLaunchPlan) -> Result<Vec<AutoDlDeployProgress>, St
 #[tauri::command]
 pub async fn autodl_deploy_prepare(
     input: AutoDlDeployPreflightInput,
+    deployment_id: String,
 ) -> Result<AutoDlDeployPrepareResult, String> {
-    let plan = build_preflight(&input)?;
+    validate_deployment_id(&deployment_id)?;
+    let mut plan = build_preflight(&input)?;
+    plan.deployment_id = deployment_id;
     let launch = build_deploy_launch_plan(
         &input.connection,
         crate::ssh_tunnel::system_ssh_path()?,
@@ -424,6 +505,23 @@ pub async fn autodl_deploy_prepare(
         progress,
         script_sha256,
     })
+}
+
+#[tauri::command]
+pub async fn autodl_deploy_status(
+    config: SshTunnelConfig,
+    deployment_id: String,
+) -> Result<Vec<AutoDlDeployProgress>, String> {
+    let launch = build_status_launch_plan(
+        &config,
+        crate::ssh_tunnel::system_ssh_path()?,
+        &deployment_id,
+    )?;
+    tauri::async_runtime::spawn_blocking(move || run_prepare(launch))
+        .await
+        .map_err(|_| {
+            "AutoDL \u{8fdc}\u{7aef}\u{72b6}\u{6001}\u{4efb}\u{52a1}\u{5f02}\u{5e38}".to_string()
+        })?
 }
 
 fn stage(value: &str) -> Option<DeployStage> {
@@ -551,5 +649,21 @@ mod tests {
         let p = parse_progress(s.as_bytes()).unwrap();
         assert_eq!(p.len(), 2);
         assert_eq!(p[1].stage, DeployStage::Completed);
+    }
+
+    #[test]
+    fn status_query_uses_fixed_command_and_id_only_in_stdin() {
+        let t = tempdir().unwrap();
+        let c = cfg(t.path());
+        let launch =
+            build_status_launch_plan(&c, "ssh.exe".into(), "h3-0123456789abcdefabcd").unwrap();
+        assert_eq!(launch.args.last().unwrap(), STATUS_REMOTE_COMMAND);
+        assert!(!launch.args.join(" ").contains("h3-0123456789abcdefabcd"));
+        assert!(
+            String::from_utf8(launch.stdin)
+                .unwrap()
+                .contains("DEPLOYMENT_ID='h3-0123456789abcdefabcd'")
+        );
+        assert!(build_status_launch_plan(&c, "ssh.exe".into(), "../../etc").is_err());
     }
 }
