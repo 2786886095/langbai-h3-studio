@@ -8,11 +8,13 @@
 - 默认把视频保存到安装程序同级 `output`，也可固定自定义目录或每次生成前询问
 - KJNodes H3 SageAttention 可安装并真实插入 H3 API Graph；未经 H3 验证的插件不会标记为兼容
 
-Windows x64 Preview 安装包：[`Langbai-H3-Studio_0.10.0_x64-setup.exe`](release/v0.10.0/Langbai-H3-Studio_0.10.0_x64-setup.exe)
+Windows x64 Preview 安装包：[`Langbai-H3-Studio_0.10.1_x64-setup.exe`](release/v0.10.1/Langbai-H3-Studio_0.10.1_x64-setup.exe)
 
 SHA-256：`B9E6BBAB672D8253539BEAC2FED7E868FAFE355A98DB1910DD2891713703453D`
 
 > 当前限制：8–10GB 显存档仍是实验目标；真实 AutoDL/RTX 5090 与 8GB 生成基准尚待对应硬件验证。市场模板 `253/678` 的内部内容不是本项目控制范围，Studio 使用隔离目录避免覆盖它。
+
+![Langbai H3 Studio v0.10.1 创作首页](docs/screenshots/v0.10.1-home.png)
 
 ## v0.8.0：8GB 实验档与远程 RTX 5090
 
