@@ -9,6 +9,8 @@ import {
   Sparkles, Sun, Upload, Video, WandSparkles, X, Zap
 } from 'lucide-react'
 import './App.css'
+import silverWolfMascot from './assets/silver-wolf-lv999-mascot.png'
+import silverWolfIcon from './assets/silver-wolf-lv999-app-icon.png'
 
 type Mode = 'text' | 'frames' | 'reference'
 type SystemProbe = { cpuName:string; cpuThreads:number; memoryTotalMb:number; memoryUsedMb:number; cudaAvailable:boolean; gpu?:{name:string;driverVersion:string;memoryTotalMb:number;memoryUsedMb:number;temperatureC?:number} }
@@ -541,7 +543,7 @@ function App() {
   return (
     <div className={dark ? 'app dark' : 'app'}>
       <aside className="sidebar">
-        <div className="brand"><div className="brand-mark"><Aperture size={20}/></div><div><strong>Langbai H3</strong><span>Studio</span></div></div>
+        <div className="brand"><div className="brand-mark"><img src={silverWolfIcon} alt="" aria-hidden="true"/></div><div><strong>Langbai H3</strong><span>Studio</span></div></div>
         <nav aria-label="主导航">
           <button className="nav-item active"><WandSparkles/><span>开始创作</span></button>
           <button className="nav-item" onClick={openHistory}><Clock3/><span>生成记录</span>{jobs.length>0&&<b>{jobs.length}</b>}</button>
@@ -601,7 +603,7 @@ function App() {
             </section>
 
             <aside className="summary-card">
-              <div className="preview"><div className="preview-art"><div className="orbit one"/><div className="orbit two"/><Aperture/><span>生成预览将在这里显示</span></div><button className="expand">↗</button></div>
+              <div className="preview"><div className="preview-art mascot-preview"><div className="orbit one"/><div className="orbit two"/><img className="preview-mascot" src={silverWolfMascot} alt="" aria-hidden="true"/><span><strong>狼尊助手已就绪</strong><small>生成预览将在这里显示</small></span></div><button className="expand" aria-label="展开预览">↗</button></div>
               <div className="summary-body"><h2>生成准备</h2><div className="summary-row"><span><Cpu/> 运行方案</span><strong>{engine==='cloud'?'MiniMax 云端':memoryProfile==='auto'?'动态显存':'低显存卸载'}</strong></div><div className="summary-row"><span><HardDrive/> {engine==='cloud'?'云端模型':'峰值显存'}</span><strong>{engine==='cloud'?(mode==='frames'&&assets.length>1?'Hailuo-02':'Hailuo-2.3'):'首次生成后记录'}</strong></div><div className="summary-row"><span><Clock3/> {engine==='cloud'?'规格':'预计耗时'}</span><strong>{engine==='cloud'?`${cloudResolution} · ${duration} 秒`:'由本机实测生成'}</strong></div><div className="summary-row"><span><FolderOpen/> 保存到</span><button onClick={openSettings}>{outputPath} <ChevronRight/></button></div>
                 <div className="fit-notice"><ShieldCheck/><span><strong>{engine==='cloud'?(apiKeyStatus.configured?'云端密钥已配置':'需要设置 API Key'):gpu&&gpu.memoryTotalMb>=24000?'达到建议显存':'需要兼容性实测'}</strong><small>{engine==='cloud'?'使用官方付费 API，不占用本机显存；费用由 MiniMax 账户结算':gpu?`${(gpu.memoryTotalMb/1024).toFixed(0)}GB 显存 · 建议 24GB 显存与 64GB 内存`:'未检测到 NVIDIA 显卡信息'}</small></span></div>
                 <button className="generate" onClick={createGenerationJob} disabled={generating||(engine==='local'&&!h3Ready)}>{generating ? <><span className="spinner"/> {engine==='cloud'?(cloudTask?.status==='running'?'云端生成中…':'云端排队中…'):generationPoll?.status==='running'?'正在生成视频…':generationPoll?.status==='queued'?'正在排队…':'正在提交素材…'}</> : <><Play/> {engine==='cloud'?'使用 Hailuo API 生成':h3Ready?'开始生成视频':'请先连接 H3 运行环境'}</>}</button><p className="queue-note">{jobMessage || (engine==='cloud'?'云端按官方 API 实际用量计费，生成结果仍保存到你的目录':h3Ready?'运行环境已通过 H3 节点校验':'在“运行环境”中安装或连接 ComfyUI，并验证 H3 必需节点')}</p>
