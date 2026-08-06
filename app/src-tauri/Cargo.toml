@@ -1,6 +1,6 @@
 [package]
 name = "langbai-h3-studio"
-version = "0.6.2"
+version = "0.6.3"
 description = "Langbai H3 Studio"
 authors = ["Langbai H3 Studio contributors"]
 license = "Apache-2.0"
