@@ -26,6 +26,62 @@ fn runtime_root() -> PathBuf {
     base.join("LangbaiH3Studio").join("runtime").join("comfy")
 }
 
+const RUNTIME_NVIDIA_MANIFEST: &str =
+    include_str!("../resources/runtime/manifests/comfyui-v0.30.0-nvidia.json");
+const RUNTIME_CU126_MANIFEST: &str =
+    include_str!("../resources/runtime/manifests/comfyui-v0.30.0-nvidia-cu126.json");
+
+fn builtin_runtime_manifest(variant: &str) -> Result<runtime_installer::RuntimeManifest, String> {
+    let source = match variant {
+        "nvidia" => RUNTIME_NVIDIA_MANIFEST,
+        "nvidia-cu126" => RUNTIME_CU126_MANIFEST,
+        _ => return Err("未知的 Runtime 版本".into()),
+    };
+    serde_json::from_str(source).map_err(|e| format!("内置 Runtime 清单损坏：{e}"))
+}
+
+#[tauri::command]
+fn runtime_manifests() -> Result<Vec<runtime_installer::RuntimeManifest>, String> {
+    Ok(vec![
+        builtin_runtime_manifest("nvidia")?,
+        builtin_runtime_manifest("nvidia-cu126")?,
+    ])
+}
+
+#[tauri::command]
+async fn runtime_download_install_activate(
+    app: tauri::AppHandle,
+    variant: String,
+) -> Result<runtime_manager::CurrentRuntime, String> {
+    let manifest = builtin_runtime_manifest(&variant)?;
+    let runtime_root = runtime_root();
+    let archive_name = format!("{}.7z", manifest.version);
+    let request = download::DownloadRequest {
+        source_url: manifest.url.clone(),
+        relative_path: std::path::PathBuf::from("downloads").join(&archive_name),
+        expected_sha256: manifest.sha256.clone(),
+    };
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60 * 60 * 12))
+        .build()
+        .map_err(|e| format!("创建 Runtime 下载客户端失败：{e}"))?;
+    let downloaded = download::download_model(&client, &runtime_root, &request, |progress| {
+        let _ = app.emit("runtime-download-progress", progress);
+    })
+    .await?;
+    runtime_installer::install_local_archive(
+        &manifest,
+        &downloaded.path,
+        &runtime_root,
+        |progress| {
+            let _ = app.emit("runtime-install-progress", progress);
+        },
+    )?;
+    runtime_manager::RuntimeManager::new(runtime_root)
+        .activate_staged(&manifest.version)
+        .map_err(|e| e.to_string())
+}
+
 struct ManagedRuntimeProcess {
     child: Child,
     endpoint: String,
@@ -51,7 +107,10 @@ fn runtime_start(
 ) -> Result<ManagedRuntimeStatus, String> {
     let manager = runtime_manager::RuntimeManager::new(runtime_root());
     let plan = manager
-        .launch_plan("python\\python.exe", "ComfyUI\\main.py")
+        .launch_plan(
+            "ComfyUI_windows_portable\\python_embeded\\python.exe",
+            "ComfyUI_windows_portable\\ComfyUI\\main.py",
+        )
         .map_err(|e| e.to_string())?;
     if !plan.program.is_file() {
         return Err("托管 Runtime 缺少 Python，可在运行环境页面执行修复".into());
@@ -211,7 +270,10 @@ fn runtime_activate_staged(version: String) -> Result<runtime_manager::CurrentRu
 #[tauri::command]
 fn runtime_launch_plan() -> Result<runtime_manager::LaunchPlan, String> {
     runtime_manager::RuntimeManager::new(runtime_root())
-        .launch_plan("python\\python.exe", "ComfyUI\\main.py")
+        .launch_plan(
+            "ComfyUI_windows_portable\\python_embeded\\python.exe",
+            "ComfyUI_windows_portable\\ComfyUI\\main.py",
+        )
         .map_err(|e| e.to_string())
 }
 
@@ -521,6 +583,8 @@ pub fn run() {
             download_model_file,
             model_store::scan_local_models,
             runtime_get_current,
+            runtime_manifests,
+            runtime_download_install_activate,
             runtime_prepare_staging,
             runtime_activate_staged,
             runtime_launch_plan,

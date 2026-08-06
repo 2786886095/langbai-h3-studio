@@ -24,6 +24,7 @@ pub struct RuntimeManifest {
 #[serde(rename_all = "lowercase")]
 pub enum ArchiveFormat {
     Zip,
+    SevenZip,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -91,6 +92,7 @@ where
 
     let result = match manifest.archive_format {
         ArchiveFormat::Zip => extract_zip(archive_path, &temporary, total, &mut emit),
+        ArchiveFormat::SevenZip => extract_7z(archive_path, &temporary, total, &mut emit),
     }
     .and_then(|_| {
         emit(event(InstallPhase::Validating, total, total, None));
@@ -109,6 +111,43 @@ where
         version: manifest.version.clone(),
         sha256: actual,
     })
+}
+
+fn extract_7z<F>(
+    archive_path: &Path,
+    destination: &Path,
+    total: u64,
+    emit: &mut F,
+) -> Result<(), InstallError>
+where
+    F: FnMut(InstallProgress),
+{
+    sevenz_rust::decompress_file_with_extract_fn(
+        archive_path,
+        destination,
+        |entry, reader, _library_path| {
+            let relative = Path::new(entry.name());
+            let target = safe_child(destination, relative)
+                .map_err(|message| sevenz_rust::Error::other(message))?;
+            emit(event(
+                InstallPhase::Extracting,
+                0,
+                total,
+                Some(relative.to_string_lossy().into_owned()),
+            ));
+            if entry.is_directory() {
+                fs::create_dir_all(&target).map_err(sevenz_rust::Error::io)?;
+            } else {
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent).map_err(sevenz_rust::Error::io)?;
+                }
+                let mut file = File::create(&target).map_err(sevenz_rust::Error::io)?;
+                io::copy(reader, &mut file).map_err(sevenz_rust::Error::io)?;
+            }
+            Ok(true)
+        },
+    )
+    .map_err(|e| format!("解压 Runtime 7z 归档失败：{e}"))
 }
 
 fn extract_zip<F>(

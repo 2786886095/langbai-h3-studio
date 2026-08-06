@@ -1,0 +1,10 @@
+{
+  "version": "comfyui-v0.30.0-nvidia-cu126",
+  "url": "https://github.com/Comfy-Org/ComfyUI/releases/download/v0.30.0/ComfyUI_windows_portable_nvidia_cu126.7z",
+  "sha256": "3e4bc720dd68f166ed8af67f4b675ef4826e1912f2bf3a0965909203a526a965",
+  "archiveFormat": "sevenzip",
+  "expectedFiles": [
+    "ComfyUI_windows_portable/python_embeded/python.exe",
+    "ComfyUI_windows_portable/ComfyUI/main.py"
+  ]
+}

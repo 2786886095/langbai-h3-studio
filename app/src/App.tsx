@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import {
   Aperture, Boxes, ChevronDown, ChevronRight, CircleHelp, Clock3, Cpu,
   Download, FolderOpen, HardDrive, Image, Info, LayoutGrid, Menu,
@@ -13,6 +14,8 @@ type SystemProbe = { cpuName:string; cpuThreads:number; memoryTotalMb:number; me
 type ComfyProbe = { reachable:boolean; baseUrl:string; nodeCount:number; h3RelatedNodes:string[]; latencyMs:number; message:string }
 type ModelScan = { root:string; maxDepth:number; models:Array<{directory:string;modelType:string;integrity:string;totalSizeBytes:number;files:Array<{path:string;sizeBytes:number;kind:string}>;warnings:string[]}>; warnings:string[] }
 type JobRecord = { id:string;name:string;status:string;stage:string;progress:number;backendId:string;outputPath?:string;errorSummary?:string;createdAt:number;updatedAt:number }
+type RuntimeManifest = { version:string;url:string;sha256:string;archiveFormat:string;expectedFiles:string[] }
+type TransferProgress = { phase:string;downloadedBytes?:number;totalBytes?:number;progressPercent?:number;bytesPerSecond?:number;etaSeconds?:number;currentFile?:string }
 
 const modeContent = {
   text: { title: '文字生成视频', desc: '只需描述画面、镜头和声音，适合从零开始创作。' },
@@ -47,9 +50,21 @@ function App() {
   const [settingsDialog, setSettingsDialog] = useState(false)
   const [outputPath, setOutputPath] = useState('D:\\H3作品')
   const [pathMessage, setPathMessage] = useState('')
+  const [runtimeManifests, setRuntimeManifests] = useState<RuntimeManifest[]>([])
+  const [runtimeProgress, setRuntimeProgress] = useState<TransferProgress | null>(null)
+  const [installingRuntime, setInstallingRuntime] = useState('')
+  const [runtimeMessage, setRuntimeMessage] = useState('')
   const estimate = useMemo(() => duration <= 6 ? '约 8–12 分钟' : duration <= 10 ? '约 14–20 分钟' : '约 22–30 分钟', [duration])
 
-  useEffect(() => { invoke<SystemProbe>('probe_system').then(setSystem).catch(() => {}) }, [])
+  useEffect(() => {
+    invoke<SystemProbe>('probe_system').then(setSystem).catch(() => {})
+    invoke<RuntimeManifest[]>('runtime_manifests').then(setRuntimeManifests).catch(()=>{})
+    const unlisteners = Promise.all([
+      listen<TransferProgress>('runtime-download-progress', event=>setRuntimeProgress(event.payload)),
+      listen<TransferProgress>('runtime-install-progress', event=>setRuntimeProgress(event.payload)),
+    ]).catch(()=>[] as Array<()=>void>)
+    return ()=>{unlisteners.then(items=>items.forEach(fn=>fn()))}
+  }, [])
   const gpu = system?.gpu
   const gpuPercent = gpu ? Math.min(100, Math.round(gpu.memoryUsedMb / gpu.memoryTotalMb * 100)) : 31
 
@@ -88,6 +103,15 @@ function App() {
     setPathMessage('正在检查…')
     try { const value = await invoke<string>('validate_output_path', { path:outputPath }); setOutputPath(value); setPathMessage('目录可写，已保存') }
     catch (error) { setPathMessage(String(error)) }
+  }
+
+  const installRuntime = async (variant:string) => {
+    setInstallingRuntime(variant);setRuntimeMessage('');setRuntimeProgress({phase:'preparing',progressPercent:0})
+    try {
+      const current = await invoke<{version:string}>('runtime_download_install_activate',{variant})
+      setRuntimeMessage(`运行环境 ${current.version} 已安装并激活`)
+    } catch(error) { setRuntimeMessage(String(error)) }
+    finally { setInstallingRuntime('') }
   }
 
   const startDownload = () => {
@@ -177,6 +201,11 @@ function App() {
       {engineDialog && <div className="modal-backdrop" role="presentation" onMouseDown={e=>{if(e.target===e.currentTarget)setEngineDialog(false)}}>
         <section className="modal" role="dialog" aria-modal="true" aria-labelledby="engine-title">
           <div className="modal-head"><div><span className="eyebrow"><Cpu/> 运行环境</span><h2 id="engine-title">连接已有 ComfyUI</h2></div><button className="icon-button" onClick={()=>setEngineDialog(false)} aria-label="关闭对话框"><X/></button></div>
+          <p>新手可以一键安装独立运行环境；已有 ComfyUI 用户也可以直接连接本机实例。</p>
+          <div className="runtime-options">{runtimeManifests.map((item,index)=><article key={item.version}><div className="model-icon"><Cpu/></div><div><strong>{index===0?'NVIDIA 新版运行环境':'NVIDIA 兼容运行环境'}</strong><small>{item.version} · 官方 ComfyUI v0.30.0 · 约 {index===0?'2.11':'2.05'} GB</small><span>{index===0?'适合 RTX 20 系及更新显卡':'CUDA 12.6，适合旧驱动或较老显卡'}</span></div><button onClick={()=>installRuntime(index===0?'nvidia':'nvidia-cu126')} disabled={!!installingRuntime}>{installingRuntime=== (index===0?'nvidia':'nvidia-cu126')?'安装中…':'下载并安装'}</button></article>)}</div>
+          {runtimeProgress && <div className="runtime-progress"><div><span>{runtimeProgress.phase}</span><strong>{Math.round(runtimeProgress.progressPercent || 0)}%</strong></div><div className="progress"><span style={{width:`${runtimeProgress.progressPercent || 0}%`}}/></div><small>{runtimeProgress.bytesPerSecond?`${(runtimeProgress.bytesPerSecond/1024/1024).toFixed(1)} MB/s`:runtimeProgress.currentFile||'正在准备'} {runtimeProgress.etaSeconds?`· 剩余约 ${Math.ceil(runtimeProgress.etaSeconds/60)} 分钟`:''}</small></div>}
+          {runtimeMessage && <div className={`probe-message ${runtimeMessage.includes('已安装')?'success':'error'}`}><ShieldCheck/><span><strong>{runtimeMessage}</strong><small>下载支持断点续传，安装前会验证官方 SHA-256。</small></span></div>}
+          <div className="section-divider"><span>或连接已有环境</span></div>
           <p>输入本机 ComfyUI 地址。探测只读取版本和节点能力，不修改现有环境。</p>
           <label htmlFor="comfy-url">ComfyUI 地址</label>
           <div className="url-row"><input id="comfy-url" value={comfyUrl} onChange={e=>setComfyUrl(e.target.value)} /><button onClick={testComfy} disabled={probing}>{probing?'正在检测…':'测试连接'}</button></div>
