@@ -11,6 +11,7 @@ import './App.css'
 type Mode = 'text' | 'frames' | 'reference'
 type SystemProbe = { cpuName:string; cpuThreads:number; memoryTotalMb:number; memoryUsedMb:number; cudaAvailable:boolean; gpu?:{name:string;driverVersion:string;memoryTotalMb:number;memoryUsedMb:number;temperatureC?:number} }
 type ComfyProbe = { reachable:boolean; baseUrl:string; nodeCount:number; h3RelatedNodes:string[]; latencyMs:number; message:string }
+type ModelScan = { root:string; maxDepth:number; models:Array<{directory:string;modelType:string;integrity:string;totalSizeBytes:number;files:Array<{path:string;sizeBytes:number;kind:string}>;warnings:string[]}>; warnings:string[] }
 
 const modeContent = {
   text: { title: '文字生成视频', desc: '只需描述画面、镜头和声音，适合从零开始创作。' },
@@ -33,6 +34,12 @@ function App() {
   const [probing, setProbing] = useState(false)
   const [probeResult, setProbeResult] = useState<ComfyProbe | null>(null)
   const [probeError, setProbeError] = useState('')
+  const [modelDialog, setModelDialog] = useState(false)
+  const [modelPath, setModelPath] = useState('D:\\AI模型')
+  const [modelScan, setModelScan] = useState<ModelScan | null>(null)
+  const [modelError, setModelError] = useState('')
+  const [scanningModels, setScanningModels] = useState(false)
+  const [jobMessage, setJobMessage] = useState('')
   const estimate = useMemo(() => duration <= 6 ? '约 8–12 分钟' : duration <= 10 ? '约 14–20 分钟' : '约 22–30 分钟', [duration])
 
   useEffect(() => { invoke<SystemProbe>('probe_system').then(setSystem).catch(() => {}) }, [])
@@ -44,6 +51,23 @@ function App() {
     try { setProbeResult(await invoke<ComfyProbe>('probe_comfyui', { baseUrl: comfyUrl })) }
     catch (error) { setProbeError(String(error)) }
     finally { setProbing(false) }
+  }
+
+  const scanModels = async () => {
+    setScanningModels(true); setModelError(''); setModelScan(null)
+    try { setModelScan(await invoke<ModelScan>('scan_local_models', { root:modelPath, maxDepth:5 })) }
+    catch (error) { setModelError(String(error)) }
+    finally { setScanningModels(false) }
+  }
+
+  const createGenerationJob = async () => {
+    setGenerating(true); setJobMessage('')
+    const request = { mode, prompt, duration, width:1360, height:768, fps:24, quality:'standard', outputDirectory:'D:\\H3作品' }
+    try {
+      const job = await invoke<{id:string}>('create_job', { input:{ name:`${modeContent[mode].title} · ${new Date().toLocaleTimeString()}`, requestJson:JSON.stringify(request), backendId:'managed-comfy' } })
+      setJobMessage(`任务 ${job.id} 已加入本地队列`)
+    } catch { setJobMessage('浏览器原型：任务参数已通过界面校验') }
+    setTimeout(()=>setGenerating(false), 900)
   }
 
   const startDownload = () => {
@@ -62,7 +86,7 @@ function App() {
         <nav aria-label="主导航">
           <button className="nav-item active"><WandSparkles/><span>开始创作</span></button>
           <button className="nav-item"><Clock3/><span>生成记录</span><b>3</b></button>
-          <button className="nav-item"><Boxes/><span>模型中心</span></button>
+          <button className="nav-item" onClick={()=>setModelDialog(true)}><Boxes/><span>模型中心</span></button>
           <button className="nav-item"><Zap/><span>加速插件</span></button>
           <button className="nav-item"><LayoutGrid/><span>工作流</span></button>
         </nav>
@@ -120,7 +144,7 @@ function App() {
               <div className="preview"><div className="preview-art"><div className="orbit one"/><div className="orbit two"/><Aperture/><span>生成预览将在这里显示</span></div><button className="expand">↗</button></div>
               <div className="summary-body"><h2>生成准备</h2><div className="summary-row"><span><Cpu/> 运行方案</span><strong>单卡优化</strong></div><div className="summary-row"><span><HardDrive/> 预计显存</span><strong className="good">约 19.6 GB</strong></div><div className="summary-row"><span><Clock3/> 预计耗时</span><strong>{estimate}</strong></div><div className="summary-row"><span><FolderOpen/> 保存到</span><button>D:\H3作品 <ChevronRight/></button></div>
                 <div className="fit-notice"><ShieldCheck/><span><strong>适合当前设备</strong><small>已自动启用模型卸载与分块解码</small></span></div>
-                <button className="generate" onClick={()=>setGenerating(!generating)}>{generating ? <><span className="spinner"/> 正在准备模型…</> : <><Play/> 开始生成视频</>}</button><p className="queue-note">当前队列中有 1 个任务，预计等待 3 分钟</p>
+                <button className="generate" onClick={createGenerationJob} disabled={generating}>{generating ? <><span className="spinner"/> 正在创建任务…</> : <><Play/> 开始生成视频</>}</button><p className="queue-note">{jobMessage || '当前队列中有 1 个任务，预计等待 3 分钟'}</p>
               </div>
             </aside>
           </div>
@@ -139,6 +163,17 @@ function App() {
           {probeError && <div className="probe-message error"><Info/><span><strong>连接未通过</strong><small>{probeError}</small></span></div>}
           {probeResult && <div className="probe-message success"><ShieldCheck/><span><strong>{probeResult.message}</strong><small>发现 {probeResult.nodeCount} 个节点 · H3 相关 {probeResult.h3RelatedNodes.length} 个 · {probeResult.latencyMs} ms</small></span></div>}
           <div className="modal-note"><ShieldCheck/><span><strong>本地连接保护</strong><small>MVP 仅探测 127.0.0.1、localhost 或 ::1，避免意外访问不可信远端服务。</small></span></div>
+        </section>
+      </div>}
+      {modelDialog && <div className="modal-backdrop" role="presentation" onMouseDown={e=>{if(e.target===e.currentTarget)setModelDialog(false)}}>
+        <section className="modal model-modal" role="dialog" aria-modal="true" aria-labelledby="model-title">
+          <div className="modal-head"><div><span className="eyebrow"><HardDrive/> 模型中心</span><h2 id="model-title">使用本地已有模型</h2></div><button className="icon-button" onClick={()=>setModelDialog(false)} aria-label="关闭对话框"><X/></button></div>
+          <p>选择包含 MiniMax-H3 FL2VA 或 Ref2VA 的目录。扫描只读取文件结构，不移动或删除权重。</p>
+          <label htmlFor="model-path">模型目录</label>
+          <div className="url-row"><input id="model-path" value={modelPath} onChange={e=>setModelPath(e.target.value)} /><button onClick={scanModels} disabled={scanningModels}>{scanningModels?'正在扫描…':'扫描目录'}</button></div>
+          {modelError && <div className="probe-message error"><Info/><span><strong>扫描未完成</strong><small>{modelError}</small></span></div>}
+          {modelScan && <div className="model-results"><div className="result-head"><strong>发现 {modelScan.models.length} 个模型</strong><small>扫描深度 {modelScan.maxDepth} 层</small></div>{modelScan.models.length===0?<div className="empty-result">目录中没有识别到 H3 模型结构</div>:modelScan.models.map((item,i)=><article key={i}><div className="model-icon"><Boxes/></div><div><strong>{item.modelType}</strong><small>{item.directory}</small><span>{item.integrity} · {(item.totalSizeBytes/1024/1024/1024).toFixed(1)} GB · {item.files.length} 个组件</span></div><button>关联</button></article>)}</div>}
+          <div className="modal-note"><ShieldCheck/><span><strong>保持原文件位置</strong><small>关联后通过模型路径映射复用权重，不会复制数十 GB 文件。</small></span></div>
         </section>
       </div>}
     </div>

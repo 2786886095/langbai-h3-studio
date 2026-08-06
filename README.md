@@ -31,7 +31,7 @@ Windows 桌面开发：`cd app; npm run desktop:dev`
 
 Windows Setup 构建需从 Visual Studio x64 Developer Command Prompt 执行：`cd app; npm run desktop:build`
 
-当前验证安装包位于 `release/v0.1.0/Langbai-H3-Studio_0.1.0_x64-setup.exe`。
+当前验证安装包位于 `release/v0.2.0/Langbai-H3-Studio_0.2.0_x64-setup.exe`。
 
 ## 文档
 

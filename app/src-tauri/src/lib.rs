@@ -1,7 +1,59 @@
 use serde::Serialize;
 use std::{path::PathBuf, process::Command, time::Duration};
 use sysinfo::System;
+use tauri::Emitter;
 use url::Url;
+
+mod comfy;
+mod download;
+mod job_store;
+mod model_store;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompiledWorkflow {
+    plan: comfy::ExecutionPlan,
+    prompt_request: comfy::PromptRequest,
+}
+
+#[tauri::command]
+fn compile_workflow(
+    template_json: String,
+    request: comfy::GenerateRequest,
+    probe: comfy::ProbeResult,
+    client_id: String,
+) -> Result<CompiledWorkflow, String> {
+    let template = comfy::WorkflowTemplate::from_json(&template_json).map_err(|e| e.to_string())?;
+    let plan = template
+        .build_plan(&request, &probe)
+        .map_err(|e| e.to_string())?;
+    let prompt_request = plan.prompt_body(client_id);
+    Ok(CompiledWorkflow {
+        plan,
+        prompt_request,
+    })
+}
+
+#[tauri::command]
+async fn download_model_file(
+    app: tauri::AppHandle,
+    model_root: String,
+    request: download::DownloadRequest,
+) -> Result<download::DownloadResult, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60 * 30))
+        .build()
+        .map_err(|e| format!("创建下载客户端失败：{e}"))?;
+    download::download_model(
+        &client,
+        std::path::Path::new(&model_root),
+        &request,
+        |progress| {
+            let _ = app.emit("model-download-progress", progress);
+        },
+    )
+    .await
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -158,7 +210,13 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             probe_system,
             probe_comfyui,
-            validate_output_path
+            validate_output_path,
+            compile_workflow,
+            download_model_file,
+            model_store::scan_local_models,
+            job_store::create_job,
+            job_store::list_jobs,
+            job_store::update_job
         ])
         .run(tauri::generate_context!())
         .expect("启动 Langbai H3 Studio 失败");
