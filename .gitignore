@@ -8,3 +8,5 @@ target/
 app/screenshot.cjs
 app/make_icon.py
 
+
+__pycache__/
